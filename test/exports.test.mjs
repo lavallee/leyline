@@ -39,6 +39,29 @@ test('the 0.2.3 export paths are all still present, pointing where they did', ()
   for (const [subpath, target] of Object.entries(before)) assert.equal(pkg.exports[subpath], target, subpath);
 });
 
+test('the 0.3.0 export paths are all still present, pointing where they did', () => {
+  const before = { './server/providers': './server/providers/index.mjs', './server/providers/codex-app-server': './server/providers/codex-app-server.mjs',
+    './server/providers/cli-oneshot': './server/providers/cli-oneshot.mjs', './server/providers/http-chat': './server/providers/http-chat.mjs',
+    './server/conversations': './server/conversations.mjs', './server/telemetry': './server/telemetry.mjs', './server/commands': './server/commands.mjs', './package.json': './package.json' };
+  for (const [subpath, target] of Object.entries(before)) assert.equal(pkg.exports[subpath], target, subpath);
+});
+
+test('0.4.0 adds one entry point per pattern', () => {
+  for (const name of ['routine-set', 'history', 'proposals', 'activity', 'threads', 'profiles', 'worklog']) assert.equal(pkg.exports[`./server/${name}`], `./server/${name}.mjs`);
+});
+
+test('a rename is one step: only package.json, the README, the changelog and docs name the package', async () => {
+  const short = pkg.name.replace(/^@[^/]+\//, ''), scope = pkg.name.split('/')[0];
+  const walk = async dir => (await Promise.all((await readdir(path.join(root, dir), { withFileTypes: true })).map(e => e.isDirectory() ? walk(`${dir}/${e.name}`) : [`${dir}/${e.name}`]))).flat();
+  for (const file of [...await walk('server'), ...await walk('src'), ...await walk('test')]) {
+    const source = await readFile(path.join(root, file), 'utf8');
+    for (const word of [pkg.name, short, short.replace(/-/g, '_'), scope]) assert.ok(!source.includes(word), `${file} contains "${word}"`);
+  }
+  const info = await import('../server/package-info.mjs');
+  assert.deepEqual([info.PACKAGE_NAME, info.PACKAGE_VERSION, info.SHORT_NAME], [pkg.name, pkg.version, short]);
+  assert.match(info.ATTRIBUTE_PREFIX, /^[a-z0-9_]+$/);
+});
+
 test('every .mjs export loads with no dependency installed and exports something', async () => {
   for (const [subpath, target] of await entries()) {
     if (!target.endsWith('.mjs')) continue;
@@ -58,7 +81,7 @@ test('server modules import only Node built-ins and each other', async () => {
   }
 });
 
-test('the package is 0.3.0, MIT, for Node 22 or later', async () => {
-  assert.equal(pkg.version, '0.3.0'); assert.equal(pkg.license, 'MIT'); assert.equal(pkg.engines.node, '>=22'); assert.equal(pkg.type, 'module');
+test('the package is 0.4.0, MIT, for Node 22 or later', async () => {
+  assert.equal(pkg.version, '0.4.0'); assert.equal(pkg.license, 'MIT'); assert.equal(pkg.engines.node, '>=22'); assert.equal(pkg.type, 'module');
   assert.match(await readFile(path.join(root, 'LICENSE'), 'utf8'), /MIT License/);
 });

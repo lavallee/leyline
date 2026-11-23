@@ -87,6 +87,15 @@ test('the host sets the sandbox roots, effort, schema and extra thread config', 
   assert.equal((await received('model/list')).length, 0);
 });
 
+test('a run can name its own model, as a profile does', async t => {
+  const { provider, received } = await setup(t);
+  const result = await provider.run({ key: 'doc@local/kiefer', input: 'hi', model: 'profile-model' });
+  assert.equal(result.provenance.model, 'profile-model');
+  assert.equal((await received('thread/start'))[0].params.model, 'profile-model');
+  assert.equal((await received('turn/start'))[0].params.model, 'profile-model');
+  assert.equal((await provider.run({ key: 'other', input: 'hi' })).provenance.model, 'fake-model');
+});
+
 test('cancel and an abort signal both stop a run', async t => {
   const { provider, received } = await setup(t);
   const first = provider.run({ key: 'a', input: 'hang' });
