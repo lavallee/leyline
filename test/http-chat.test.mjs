@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { HttpChatProvider, sseEvents } from '@lyra-forge/agent-chat/server/providers/http-chat';
+import { HttpChatProvider, sseEvents } from '../server/providers/http-chat.mjs';
 
 // A local server standing in for a model endpoint. `reply(req, body, res)` decides the answer.
 async function endpoint(t, reply) {

@@ -15,6 +15,7 @@
 // nothing. No prompt, reply or activity text is ever sent: only names, times, token
 // counts and the status.
 import { randomBytes } from 'node:crypto';
+import { PACKAGE_NAME, PACKAGE_VERSION, SHORT_NAME, ATTRIBUTE_PREFIX } from './package-info.mjs';
 
 const nanos = iso => { const ms = Date.parse(iso); return Number.isFinite(ms) ? `${BigInt(ms) * 1000000n}` : '0'; };
 const attribute = (key, value) => typeof value === 'number'
@@ -26,7 +27,7 @@ const attribute = (key, value) => typeof value === 'number'
  * OpenTelemetry GenAI attribute names. A provider that answers a single model call
  * ('http-chat') is reported as a `chat` span; an agent program is `invoke_agent`.
  */
-export function otlpPayload(record, { serviceName = 'agent-chat', attributes = {}, operation } = {}) {
+export function otlpPayload(record, { serviceName = SHORT_NAME, attributes = {}, operation } = {}) {
   const provider = record.provenance?.provider, model = record.provenance?.model;
   const kind = operation || (provider === 'http-chat' ? 'chat' : 'invoke_agent');
   const named = model && model !== 'provider default' ? model : undefined;
@@ -41,14 +42,14 @@ export function otlpPayload(record, { serviceName = 'agent-chat', attributes = {
     'gen_ai.usage.cache_read.input_tokens': record.usage?.cachedInputTokens || undefined,
     'gen_ai.usage.reasoning.output_tokens': record.usage?.reasoningOutputTokens || undefined,
     'error.type': record.status === 'failed' ? 'error' : record.status === 'stopped' ? 'cancelled' : undefined,
-    'agent_chat.turn.id': record.turnId,
-    'agent_chat.turn.status': record.status,
-    'agent_chat.lane': record.lane,
+    [`${ATTRIBUTE_PREFIX}.turn.id`]: record.turnId,
+    [`${ATTRIBUTE_PREFIX}.turn.status`]: record.status,
+    [`${ATTRIBUTE_PREFIX}.lane`]: record.lane,
     ...attributes,
   };
   return { resourceSpans: [{
     resource: { attributes: [attribute('service.name', serviceName)] },
-    scopeSpans: [{ scope: { name: '@lyra-forge/agent-chat' }, spans: [{
+    scopeSpans: [{ scope: { name: PACKAGE_NAME, version: PACKAGE_VERSION }, spans: [{
       traceId: randomBytes(16).toString('hex'), spanId: randomBytes(8).toString('hex'),
       name: [kind, kind === 'chat' ? named : provider].filter(Boolean).join(' '), kind: 3,
       startTimeUnixNano: nanos(record.startedAt), endTimeUnixNano: nanos(record.finishedAt),
@@ -63,7 +64,7 @@ export function otlpPayload(record, { serviceName = 'agent-chat', attributes = {
  * @param {string} [options.url] the full traces URL. Without it the reporter does nothing.
  * @param {string} [options.tokenEnv] the NAME of an environment variable holding a bearer token
  * @param {object} [options.headers] extra request headers
- * @param {string} [options.serviceName] default 'agent-chat'
+ * @param {string} [options.serviceName] default: this package's short name
  * @param {object} [options.attributes] extra span attributes on every span
  * @param {(record: object) => boolean} [options.filter] return false to skip a record
  * @param {number} [options.timeout] milliseconds; default 5000

@@ -11,6 +11,7 @@ import { constants } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ProviderError, inputParts } from './contract.mjs';
+import { SHORT_NAME } from '../package-info.mjs';
 
 export const ENV_KEYS = ['HOME', 'PATH', 'CODEX_HOME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'DBUS_SESSION_BUS_ADDRESS', 'XDG_RUNTIME_DIR', 'USER', 'SHELL', 'TERM'];
 const pick = keys => Object.fromEntries(keys.filter(k => process.env[k]).map(k => [k, process.env[k]]));
@@ -60,7 +61,7 @@ export const PRESETS = {
   // config and rules ignored: it sees only the prompt. Runs in an empty temporary folder.
   async codex(config, prompt, { timeout, signal, outputSchema, env }) {
     if (!await executable(config.bin)) throw new ProviderError('Configure the absolute path of the signed-in Codex CLI (bin).', 'unavailable');
-    const dir = await mkdtemp(path.join(os.tmpdir(), 'agent-chat-'));
+    const dir = await mkdtemp(path.join(os.tmpdir(), `${SHORT_NAME}-`));
     try {
       const login = await runProcess(config.bin, ['login', 'status'], { cwd: dir, timeout: 15000, env });
       if (login.code !== 0) throw new ProviderError('Codex is not signed in on this host. Refresh its login.', 'auth');

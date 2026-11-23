@@ -4,7 +4,7 @@ import http from 'node:http';
 import net from 'node:net';
 import { stat, readFile, writeFile, chmod, mkdir, readdir } from 'node:fs/promises';
 import path from 'node:path';
-import { issueKey, sameSecret, sessionFile, stateHome, writeSession, readSession, removeSession, verifyRequest, createCommandEndpoint, call, readStdin } from '@lyra-forge/agent-chat/server/commands';
+import { issueKey, sameSecret, sessionFile, stateHome, writeSession, readSession, removeSession, verifyRequest, createCommandEndpoint, call, readStdin } from '../server/commands.mjs';
 import { tempDir } from './helpers.mjs';
 
 const request = (overrides = {}, key = 'k'.repeat(48), port = 4173) => ({ socket: { remoteAddress: '127.0.0.1' }, headers: { host: `127.0.0.1:${port}`, authorization: `Bearer ${key}` }, ...overrides });

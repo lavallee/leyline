@@ -12,6 +12,7 @@
 import { mkdir } from 'node:fs/promises';
 import { CodexRpc } from '../codex-rpc.mjs';
 import { ProviderError, inputParts } from './contract.mjs';
+import { SHORT_NAME } from '../package-info.mjs';
 
 const ZERO = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 };
 const said = text => ({ type: 'text', text, text_elements: [] });
@@ -38,7 +39,7 @@ export class CodexAppServerProvider {
    * @param {(request: object) => object} [options.onApproval] answers an approval request; default declines
    * @param {(chunk: Buffer) => void} [options.onStderr]
    */
-  constructor({ command = ['codex', 'app-server'], workDir, clientInfo = { name: 'agent-chat' }, serviceName, env = process.env,
+  constructor({ command = ['codex', 'app-server'], workDir, clientInfo = { name: SHORT_NAME }, serviceName, env = process.env,
     dropEnv = ['OPENAI_API_KEY'], disableUserExtensions = true, threadConfig = {}, model, onApproval, onStderr } = {}) {
     if (!Array.isArray(command) || !command.length || command.some(part => typeof part !== 'string' || !part || part.includes('\0')))
       throw new ProviderError('The app-server command must be a list of non-empty strings.', 'config');
@@ -99,8 +100,9 @@ export class CodexAppServerProvider {
    *   when the thread starts; later runs on the same key keep them.
    * @param {object} [request.outputSchema] a JSON Schema for the final message
    * @param {object} [request.threadConfig] extra Codex config for this key's thread
+   * @param {string} [request.model] a model for this run, instead of the provider's
    */
-  async run({ key, instructions, input, effort = 'low', sandbox = {}, outputSchema, threadConfig, onEvent = () => {}, signal, timeout = 900000 } = {}) {
+  async run({ key, instructions, input, effort = 'low', sandbox = {}, outputSchema, threadConfig, model: asked, onEvent = () => {}, signal, timeout = 900000 } = {}) {
     if (typeof key !== 'string' || !key) throw new ProviderError('Give the run a conversation key.', 'config');
     const parts = inputParts(input);
     if (!parts.length) throw new ProviderError('Give the run some input.', 'config');
@@ -112,7 +114,8 @@ export class CodexAppServerProvider {
     const policy = write
       ? { type: 'workspaceWrite', writableRoots: sandbox.writableRoots || [], networkAccess: !!sandbox.network, excludeTmpdirEnvVar: false, excludeSlashTmp: false }
       : { type: 'readOnly', ...(sandbox.network ? { networkAccess: true } : {}) };
-    const model = this.model ? { model: this.model } : {};
+    const named = asked || this.model;
+    const model = named ? { model: named } : {};
     let threadId = this.threads.get(key);
     if (!threadId) {
       const response = await this.rpc.call('thread/start', { cwd, approvalPolicy: 'never', sandbox: write ? 'workspace-write' : 'read-only',
@@ -123,7 +126,7 @@ export class CodexAppServerProvider {
     if (signal?.aborted) throw new ProviderError('Stopped.', 'stopped');
     return new Promise((resolve, reject) => {
       const abort = () => this.cancel(key);
-      const run = { key, threadId, text: '', turnId: null, cancelled: false, onEvent, parts: new Set(), usageStart: this.totals.get(threadId) || ZERO,
+      const run = { key, threadId, model: asked, text: '', turnId: null, cancelled: false, onEvent, parts: new Set(), usageStart: this.totals.get(threadId) || ZERO,
         finish: (error, result) => {
           if (this.pending.get(threadId) !== run) return;
           clearTimeout(run.timer); signal?.removeEventListener('abort', abort); this.pending.delete(threadId);
@@ -193,7 +196,7 @@ export class CodexAppServerProvider {
         ? new ProviderError('Stopped.', 'stopped') : new ProviderError(p.turn?.error?.message || 'The request stopped.', 'failed'));
       const total = this.totals.get(threadId);
       const usage = total ? Object.fromEntries(Object.keys(ZERO).map(name => [name, Math.max(0, (total[name] || 0) - (run.usageStart[name] || 0))])) : undefined;
-      run.finish(null, { message: run.text, provenance: { provider: this.name, model: this.model || 'provider default', threadId }, ...(usage ? { usage } : {}) });
+      run.finish(null, { message: run.text, provenance: { provider: this.name, model: run.model || this.model || 'provider default', threadId }, ...(usage ? { usage } : {}) });
     }
   }
 

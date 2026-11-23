@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { CodexAppServerProvider, commandLine } from '@lyra-forge/agent-chat/server/providers/codex-app-server';
-import { ProviderError, foldActivity } from '@lyra-forge/agent-chat/server/providers';
+import { CodexAppServerProvider, commandLine } from '../server/providers/codex-app-server.mjs';
+import { ProviderError, foldActivity } from '../server/providers/index.mjs';
 import { fixture, tempDir, readLines, until } from './helpers.mjs';
 
 async function setup(t, options = {}) {

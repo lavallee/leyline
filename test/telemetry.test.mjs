@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { createOtlpReporter, otlpPayload } from '@lyra-forge/agent-chat/server/telemetry';
+import { createOtlpReporter, otlpPayload } from '../server/telemetry.mjs';
+import { ATTRIBUTE_PREFIX, SHORT_NAME } from '../server/package-info.mjs';
 
 const record = { key: 'doc-1', lane: 'doc-1:main', turnId: 'turn-1', status: 'succeeded', startedAt: '2026-11-23T10:00:00.000Z', finishedAt: '2026-11-23T10:00:02.500Z',
   durationMs: 2500, provenance: { provider: 'codex-app-server', model: 'gpt-x', threadId: 't1' }, usage: { inputTokens: 120, outputTokens: 30, cachedInputTokens: 0, reasoningOutputTokens: 8 } };
@@ -36,7 +37,7 @@ test('an agent turn becomes one invoke_agent span with GenAI attributes and no c
   assert.deepEqual(span.status, { code: 1 });
   assert.deepEqual(attrs(span), { 'gen_ai.operation.name': 'invoke_agent', 'gen_ai.provider.name': 'codex-app-server', 'gen_ai.agent.name': 'codex-app-server', 'gen_ai.request.model': 'gpt-x',
     'gen_ai.conversation.id': 'doc-1', 'gen_ai.usage.input_tokens': 120, 'gen_ai.usage.output_tokens': 30, 'gen_ai.usage.reasoning.output_tokens': 8,
-    'agent_chat.turn.id': 'turn-1', 'agent_chat.turn.status': 'succeeded', 'agent_chat.lane': 'doc-1:main', 'somm.workload': 'page-chat' });
+    [`${ATTRIBUTE_PREFIX}.turn.id`]: 'turn-1', [`${ATTRIBUTE_PREFIX}.turn.status`]: 'succeeded', [`${ATTRIBUTE_PREFIX}.lane`]: 'doc-1:main', 'somm.workload': 'page-chat' });
   assert.ok(!JSON.stringify(payload).includes('THE RE'), 'no request or reply text is exported');
   assert.equal(span.attributes.find(a => a.key === 'gen_ai.usage.input_tokens').value.intValue, '120', 'integers use the OTLP JSON string form');
 });

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ProviderError, foldActivity, settleActivity, assertProvider, CodexAppServerProvider, CliOneshotProvider, HttpChatProvider } from '@lyra-forge/agent-chat/server/providers';
+import { ProviderError, foldActivity, settleActivity, assertProvider, CodexAppServerProvider, CliOneshotProvider, HttpChatProvider } from '../server/providers/index.mjs';
 
 test('foldActivity keeps one item per id and applies deltas, text, titles and status', () => {
   const items = [];

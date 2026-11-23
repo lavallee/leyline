@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const fixture = name => path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', name);
-export async function tempDir(t, prefix = 'agent-chat-test-') {
+export async function tempDir(t, prefix = 'kit-test-') {
   const dir = await mkdtemp(path.join(os.tmpdir(), prefix));
   t.after(() => rm(dir, { recursive: true, force: true }));
   return dir;

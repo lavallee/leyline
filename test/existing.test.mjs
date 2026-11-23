@@ -3,9 +3,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { stat, readdir } from 'node:fs/promises';
 import path from 'node:path';
-import { CodexRpc } from '@lyra-forge/agent-chat/server/rpc';
-import { createRoutineBank } from '@lyra-forge/agent-chat/server/routines';
-import { routineSlug, routineMatches } from '@lyra-forge/agent-chat/routines';
+import { CodexRpc } from '../server/codex-rpc.mjs';
+import { createRoutineBank } from '../server/routine-bank.mjs';
+import { routineSlug, routineMatches } from '../src/routines.mjs';
 import { fixture, tempDir } from './helpers.mjs';
 
 test('CodexRpc: calls resolve, notifications and requests are emitted, a dead child rejects', async t => {

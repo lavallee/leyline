@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { writeFile, chmod, readFile, readdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { CliOneshotProvider, runProcess, parseJsonAnswer, ENV_KEYS } from '@lyra-forge/agent-chat/server/providers/cli-oneshot';
+import { CliOneshotProvider, runProcess, parseJsonAnswer, ENV_KEYS } from '../server/providers/cli-oneshot.mjs';
 import { fixture, tempDir } from './helpers.mjs';
+import { SHORT_NAME } from '../server/package-info.mjs';
 
 const echo = [process.execPath, fixture('echo-agent.mjs')];
 
@@ -82,7 +83,7 @@ test('codex preset: checks the login, then runs read-only with tools and user co
   if (args[0] === 'login') process.exit(0);
   fs.writeFileSync(args[args.indexOf('--output-last-message') + 1], JSON.stringify({ summary: 'from codex' }));`);
   const schema = { type: 'object', required: ['summary'], properties: { summary: { type: 'string' } } };
-  const before = (await readdir(os.tmpdir())).filter(name => name.startsWith('agent-chat-') && !name.startsWith('agent-chat-test-'));
+  const before = (await readdir(os.tmpdir())).filter(name => name.startsWith(`${SHORT_NAME}-`));
   const result = await new CliOneshotProvider({ preset: 'codex', bin, model: 'some-model' }).run({ input: 'the prompt', outputSchema: schema, json: true, cwd: '/' });
   assert.deepEqual(result.data, { summary: 'from codex' });
   const [login, exec] = await calls();
@@ -98,7 +99,7 @@ test('codex preset: checks the login, then runs read-only with tools and user co
   assert.ok(exec.args.includes('--output-schema'));
   assert.equal(exec.args.at(-1), '-', 'the prompt is read from stdin');
   assert.notEqual(exec.cwd, '/', 'codex runs in an empty temporary folder, not where the host points');
-  const after = (await readdir(os.tmpdir())).filter(name => name.startsWith('agent-chat-') && !name.startsWith('agent-chat-test-'));
+  const after = (await readdir(os.tmpdir())).filter(name => name.startsWith(`${SHORT_NAME}-`));
   assert.deepEqual(after, before, 'the temporary folder is removed');
 });
 

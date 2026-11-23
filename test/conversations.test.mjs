@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir, stat, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import { createConversationStore, ConversationError, fileNameFor, TURN_STATUSES } from '@lyra-forge/agent-chat/server/conversations';
+import { createConversationStore, ConversationError, fileNameFor, TURN_STATUSES } from '../server/conversations.mjs';
 import { tempDir, until, deferred } from './helpers.mjs';
 
 const onDisk = async (dir, key) => JSON.parse(await readFile(path.join(dir, fileNameFor(key)), 'utf8'));
