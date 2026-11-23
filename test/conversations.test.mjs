@@ -2,8 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir, stat, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import { createConversationStore, ConversationError, fileNameFor, TURN_STATUSES } from '../server/conversations.mjs';
-import { tempDir, until, deferred } from './helpers.mjs';
+import { createConversationStore as create, ConversationError, fileNameFor, TURN_STATUSES } from '../server/conversations.mjs';
+import { tempDir, until, deferred, beforeCleanup } from './helpers.mjs';
+
+// Every store a test makes is closed before its folder is removed.
+const createConversationStore = options => { const store = create(options); beforeCleanup(() => store.close()); return store; };
 
 const onDisk = async (dir, key) => JSON.parse(await readFile(path.join(dir, fileNameFor(key)), 'utf8'));
 const settled = turn => until(() => ['succeeded', 'failed', 'stopped'].includes(turn.status));
@@ -139,7 +142,7 @@ test('stop: a waiting request is removed, a running one is aborted, and both are
   assert.equal(first.status, 'stopped');
   assert.equal(first.message, 'Stopped by you.');
   assert.equal(first.activities[0].status, 'stopped');
-  await until(() => third.status === 'running');
+  await until(() => ran.length === 2);
   assert.deepEqual(ran, ['first', 'third'], 'the removed request never ran');
   await store.stopAll('k');
   await settled(third);

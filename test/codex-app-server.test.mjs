@@ -123,12 +123,15 @@ test('a second run on a busy key is refused', async t => {
 test('approval requests are declined unless the host answers them', async t => {
   const { provider, log } = await setup(t);
   await provider.run({ key: 'a', input: 'approve this' });
-  assert.deepEqual((await readLines(log)).find(m => m.id >= 9000 && m.result).result, { decision: 'decline' });
+  const answer = async file => (await readLines(file)).find(m => m.id >= 9000 && m.result);
+  await until(() => answer(log));
+  assert.deepEqual((await answer(log)).result, { decision: 'decline' });
   const asked = [];
   const other = await setup(t, { onApproval: request => { asked.push(request.method); return { decision: 'accept' }; } });
   await other.provider.run({ key: 'a', input: 'approve this' });
   assert.deepEqual(asked, ['item/commandExecution/requestApproval']);
-  assert.deepEqual((await readLines(other.log)).find(m => m.id >= 9000 && m.result).result, { decision: 'accept' });
+  await until(() => answer(other.log));
+  assert.deepEqual((await answer(other.log)).result, { decision: 'accept' });
 });
 
 test('an agent error fails the run; a dead child fails it and the next run starts a new child', async t => {
