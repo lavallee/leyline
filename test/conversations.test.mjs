@@ -195,19 +195,23 @@ test('reset archives the old turns and refuses while anything is running', async
 });
 
 test('a turn with its final status no longer keeps the conversation busy', async t => {
-  // The last write and the onCall hook come after the status: a host that sees
-  // "succeeded" must be able to reset or send at once.
-  let slowHook;
-  const store = createConversationStore({ dir: await tempDir(t), run: async () => ({ message: 'ok' }), onCall: () => { slowHook = true; } });
-  for (let i = 0; i < 20; i++) {
-    const turn = await store.send('k', { user: `request ${i}` });
-    await until(() => turn.status === 'succeeded');
-    assert.equal(store.busy('k'), false);
-    assert.equal(store.running('k:main'), undefined);
-    await store.reset('k');
-  }
-  await store.flush();
-  assert.equal(slowHook, true);
+  // The last write and the onCall hook come after the status. A host that sees
+  // "succeeded" must be able to reset, or send to a strict queue, at once.
+  const gate = deferred();
+  const store = createConversationStore({ dir: await tempDir(t), run: async () => { await gate.promise; return { message: 'ok' }; } });
+  const turn = await store.send('k', { user: 'request' });
+  await until(() => turn.status === 'running');
+  // Watch for the moment the status becomes final, and look just after it, before the last write can have finished.
+  let status = turn.status, busyJustAfter, laneJustAfter;
+  Object.defineProperty(turn, 'status', { enumerable: true, configurable: true, get: () => status,
+    set(value) { status = value; if (value === 'succeeded') queueMicrotask(() => { busyJustAfter = store.busy('k'); laneJustAfter = store.running('k:main'); }); } });
+  assert.equal(store.busy('k'), true);
+  gate.resolve();
+  await until(() => busyJustAfter !== undefined);
+  assert.equal(busyJustAfter, false);
+  assert.equal(laneJustAfter, undefined);
+  await store.reset('k');
+  assert.deepEqual(store.get('k').turns, []);
 });
 
 test('limits: a full conversation refuses more, and activities are capped', async t => {
