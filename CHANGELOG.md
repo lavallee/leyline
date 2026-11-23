@@ -35,6 +35,8 @@ Changed:
 
 Fixed:
 
+- The Codex adapter could ask for a turn to be interrupted twice when a stop arrived
+  before the turn's id was known. It now asks once.
 - Three tests could fail on a busy machine (a store still writing while its folder was
   removed, and two that asserted before the thing they waited for). The library code was
   not at fault; the tests now wait for what they assert on.

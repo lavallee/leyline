@@ -107,7 +107,7 @@ test('cancel and an abort signal both stop a run', async t => {
   await until(async () => (await received('turn/start')).length === 2);
   controller.abort();
   await assert.rejects(second, { code: 'stopped' });
-  assert.equal((await received('turn/interrupt')).length, 2);
+  assert.equal((await received('turn/interrupt')).length, 2, 'one interrupt per stopped run');
   assert.equal(provider.cancel('nobody'), false);
   await assert.rejects(provider.run({ key: 'c', input: 'x', signal: AbortSignal.abort() }), { code: 'stopped' });
   assert.equal((await provider.run({ key: 'a', input: 'again' })).message, 'turn 2: again', 'the thread survives a stop');

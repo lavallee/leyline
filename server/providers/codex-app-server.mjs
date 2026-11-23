@@ -143,7 +143,13 @@ export class CodexAppServerProvider {
     });
   }
 
-  interrupt(run) { this.rpc?.call('turn/interrupt', { threadId: run.threadId, turnId: run.turnId }).catch(() => {}); }
+  // Asked once per run: a cancel can arrive before the turn's id is known, and the id then
+  // comes from two places (the reply to turn/start and the turn/started notification).
+  interrupt(run) {
+    if (run.interrupted || !run.turnId) return;
+    run.interrupted = true;
+    this.rpc?.call('turn/interrupt', { threadId: run.threadId, turnId: run.turnId }).catch(() => {});
+  }
 
   /** Asks the agent to stop the run for `key`. The run then rejects with code 'stopped'. */
   cancel(key) {
