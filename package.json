@@ -1,8 +1,16 @@
 {
   "name": "@lyra-forge/agent-chat",
-  "version": "0.2.3",
+  "version": "0.3.0",
+  "description": "A chat panel and the server pieces behind it, for tools where people and coding agents work on the same thing.",
   "type": "module",
   "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "check": "for f in server/*.mjs server/providers/*.mjs src/*.mjs test/*.mjs test/fixtures/*.mjs; do node --check \"$f\" || exit 1; done"
+  },
   "exports": {
     ".": "./src/index.tsx",
     "./ui/*": "./src/ui/*.tsx",
@@ -12,13 +20,22 @@
     "./server/rpc": "./server/codex-rpc.mjs",
     "./server/routines": "./server/routine-bank.mjs",
     "./routines": "./src/routines.mjs",
-    "./routine-menu": "./src/routine-menu.tsx"
+    "./routine-menu": "./src/routine-menu.tsx",
+    "./server/providers": "./server/providers/index.mjs",
+    "./server/providers/codex-app-server": "./server/providers/codex-app-server.mjs",
+    "./server/providers/cli-oneshot": "./server/providers/cli-oneshot.mjs",
+    "./server/providers/http-chat": "./server/providers/http-chat.mjs",
+    "./server/conversations": "./server/conversations.mjs",
+    "./server/telemetry": "./server/telemetry.mjs",
+    "./server/commands": "./server/commands.mjs",
+    "./package.json": "./package.json"
   },
   "files": [
     "src",
+    "server",
     "LICENSE",
     "README.md",
-    "server"
+    "CHANGELOG.md"
   ],
   "peerDependencies": {
     "react": ">=19",
