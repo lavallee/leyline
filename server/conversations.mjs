@@ -74,7 +74,9 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
   const guard = fn => { try { return fn(); } catch (error) { onError(error); } };
 
   const check = key => { if (typeof key !== 'string' || !key || key.includes('\0')) throw new ConversationError('Invalid conversation key.', 'invalid'); return key; };
-  const lanesOf = key => [...running.values()].filter(r => r.lane.key === key);
+  // A lane is at work until its turn has its final status. The last write and the hooks
+  // that follow do not keep a conversation busy.
+  const lanesOf = key => [...running.values()].filter(r => r.lane.key === key && !r.done);
 
   // One write at a time, each to a temporary file that is then renamed over the real one.
   function persist(conversation) {
@@ -169,6 +171,7 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
       turn.status = stopped ? 'stopped' : 'failed';
       turn.message = stopped ? words.stopped : guard(() => describeFailure(error, turn)) || 'The request could not be completed.';
     }
+    runtime.done = true;
     clearTimeout(runtime.timer); runtime.timer = null;
     settleActivity(turn.activities, turn.status === 'succeeded');
     turn.finishedAt = now();
@@ -226,7 +229,7 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
     /** The loaded conversation for a key, or undefined before open(). */
     get: key => conversations.get(key),
     /** What is running in a lane, by lane id: { turn, lane } or undefined. For a host's agent command route. */
-    running: laneId => { const r = running.get(laneId); return r && { turn: r.turn, lane: r.lane }; },
+    running: laneId => { const r = running.get(laneId); return r && !r.done ? { turn: r.turn, lane: r.lane } : undefined; },
     /** The lanes at work on a conversation. */
     lanes: key => lanesOf(key).map(r => ({ turn: r.turn, lane: r.lane })),
     /** Schedules nothing, writes now. For a host that changed a conversation outside a run. */

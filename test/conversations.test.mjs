@@ -194,6 +194,22 @@ test('reset archives the old turns and refuses while anything is running', async
   assert.equal((await readdir(path.join(dir, 'archive'))).length, 1, 'an empty conversation is not archived');
 });
 
+test('a turn with its final status no longer keeps the conversation busy', async t => {
+  // The last write and the onCall hook come after the status: a host that sees
+  // "succeeded" must be able to reset or send at once.
+  let slowHook;
+  const store = createConversationStore({ dir: await tempDir(t), run: async () => ({ message: 'ok' }), onCall: () => { slowHook = true; } });
+  for (let i = 0; i < 20; i++) {
+    const turn = await store.send('k', { user: `request ${i}` });
+    await until(() => turn.status === 'succeeded');
+    assert.equal(store.busy('k'), false);
+    assert.equal(store.running('k:main'), undefined);
+    await store.reset('k');
+  }
+  await store.flush();
+  assert.equal(slowHook, true);
+});
+
 test('limits: a full conversation refuses more, and activities are capped', async t => {
   const store = createConversationStore({ dir: await tempDir(t), maxTurns: 2, maxActivities: 3, run: async (turn, lane, signal, tools) => {
     for (let i = 0; i < 10; i++) tools.activity({ id: `a${i}`, kind: 'activity', status: 'done' });
