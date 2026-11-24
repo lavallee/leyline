@@ -52,7 +52,7 @@ Copycat's live page sit behind the same History panel.
 
 The first three each end with the host's own tests and a look in a browser.
 
-**Where it stands (2026-11-24).** 1–3 are done on branches: Leyline `shell`, Toucan
+**Where it stands (2026-11-24).** 1–3 are done on branches: Leyline 0.8.0, Toucan
 `leyline-shell`, Copycat `shell`, each pinned to the same Leyline revision. Still open:
 
 - **Copycat on a phone** keeps its bar at the bottom (reading mode, the block row, the

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.0 (unreleased)
+## 0.8.0 (2026-11-24)
 
 The shell: the strip, side panel, routines and history that every one of our tools shows,
 moved here so none of them keeps its own copy (`docs/shell.md`).
