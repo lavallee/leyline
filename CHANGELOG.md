@@ -12,6 +12,12 @@ Added:
   goes), and what a stopped request leaves behind differs between them. A plain string
   works as before; a function that returns nothing falls back to the library's sentence.
 
+Changed:
+
+- `docs/adopting.md`: Copycat's steps have been carried out (its branch `adopt-package`);
+  a new section lists where its code went differently from the steps as written.
+- The 0.4.0 note "no host has adopted any server module" no longer holds for Copycat.
+
 Unchanged: every 0.4.0 export path and signature, and the UI.
 
 ## 0.4.0 (2026-11-23)

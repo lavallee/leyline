@@ -1,8 +1,13 @@
 # Moving a host onto the package
 
 Steps for Copycat, Skein and Toucan, written from reading their code on 2026-11-23.
-**None of these steps has been carried out.** Each is a change to another repository,
-to be made and tested there. File and function names are the hosts' own.
+Each is a change to another repository, to be made and tested there. File and function
+names are the hosts' own.
+
+**Copycat's steps were carried out on 2026-11-23** (its branch `adopt-package`, pinned at
+0.4.1, not merged at the time of writing). Section 2 is kept as it was written, and
+"What Copycat's adoption found" below it lists where the code went differently.
+**Skein's and Toucan's steps have not been carried out.**
 
 Every step is separate: a host can stop after any of them. Do step 1 first.
 
@@ -130,6 +135,54 @@ and `ack`. The agent then hears "the owner changed content.md" with its next com
 - `session()` and `call()` in the CLI → `call({ app: 'copycat', name: `agent-${port}`, operation, data: { ...data, page } })`.
 - The `/agent/` block → `createCommandEndpoint({ port, key: chat.agentToken, operations: { show, edit, comments, reply } })` and `if (await commands.handle(req, res)) return`.
 - The `writeFile` of the session in `runLive` → `writeSession({ app: 'copycat', name: `agent-${port}`, url, key })`. The path is the same unless `XDG_STATE_HOME` is set, which the library honours.
+
+### What Copycat's adoption found
+
+Copycat had changed between the steps above being written and being carried out: a live
+page's draft is now held by the server (one draft, a revision and a log of splices), and
+an agent's edit to it is a splice there. Its `docs/approach.md` has the full account.
+What the next host should know:
+
+- **Pin.** `npm install ./vendor/<tarball>` and the rebuilt UI bundle was byte-identical
+  to the 0.2.3 one, as promised. The pin script needed three changes: pack `.`, check the
+  status of the whole repository, and remove the old tarball.
+- **Provider errors.** Two messages needed mapping, not one: a lost connection
+  (`unavailable`, "The agent connection stopped.") and a child that could not start,
+  which the adapter prefixes with "The agent could not start: ".
+- **Activity wording needs the turn.** `describeActivity` on the store receives the
+  event and the item only. Copycat's wording depends on the page (its notes folder, its
+  root), so it calls `foldActivity(turn.activities, event, { describe })` itself inside
+  `run` and then `tools.save()`. Its `describe` also deletes `item.command` and
+  `item.paths`, which `foldActivity` stores and Copycat does not want on disk.
+- **Two kinds of request in one store.** Copycat's one-shot turns and live turns share a
+  conversation. Both go through `store.send`; `run` branches on a field of the turn. The
+  stop message differs between them, which is why `messages.stopped` may be a function of
+  the turn from 0.4.1. A host that must know when a turn has fully ended (Copycat frees
+  its one-shot agent then) can use `onLaneClosed`, which runs after the last write.
+- **`store.save(key)` instead of a delayed write** in the agent's command route worked,
+  awaited, so what a command changed is on disk before the agent hears back.
+- **A stop can arrive before `run` is called.** `run` then receives a signal that is
+  already aborted. The adapters check for that; a host's own `run` should too.
+- **Routines.** `list()` sorts by title. Copycat's menu lists its shipped routines first,
+  in its own order, so it re-sorts the list. `turnFor` fitted as written; the prefix
+  Copycat adds for a routine run on a selection stays in Copycat.
+- **Proposals with a server-held draft.** `make` checks, applies and records in one call,
+  but the real document is the host's draft and its write can still be refused (a size
+  limit) or fail. Copycat calls `make` with the draft's text at that moment, then makes
+  the splice, then adds `shared`, `rev` and `fate: 'applied'` to the proposal `make`
+  returned; if the splice is refused it takes the proposal out of `turn.proposals` again.
+  `report` accepts any fate for any proposal, so Copycat filters what a browser says
+  first: for an edit made in the shared draft, a browser's only news is `undone`.
+  `replay` and `feedback` fitted as written. `offer` was not used for the one-shot path:
+  that check also serves a panel with no turn, and its problem text is Copycat's.
+- **Undo stayed in the browser.** Only files marked live have a server draft; the rest
+  still have one draft per browser.
+- **Commands.** Copycat passes `stateDir` to `writeSession` and `call` (the plain
+  `~/.local/state`), so both sides agree whatever `XDG_STATE_HOME` says, and maps
+  `call`'s "No copycat session found" back to its own sentence. `createCommandEndpoint`
+  needed `maxBody` raised to Copycat's 4 MB.
+- **Tests that reached into the old store** (setting a running turn by hand) now hold the
+  host's `run` open instead and call the command route while it waits.
 
 ## 3. Skein
 

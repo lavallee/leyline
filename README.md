@@ -716,14 +716,17 @@ compiled or tested here; consumers build them.
 - **Toucan has not adopted the package.** Toucan `main` still runs its own copy of the
   chat panel and its own Codex transport. The UI here is the 0.2.3 extraction and does
   not include Toucan's later changes.
-- **No host uses the new server modules yet**, neither the 0.3.0 ones nor the 0.4.0
-  ones. Copycat, Skein and Toucan still run their own code. Every module here was written
-  from that code and is tested alone and together (`test/together.test.mjs`); moving a
-  host onto them is the next step and will find gaps.
-- **Not run against real agents or providers.** The Codex adapter was checked against
-  the protocol types `codex app-server generate-ts` produces (Codex CLI 0.171.0) and a
-  fake server, not a live one. `http-chat` and the Somm settings have not been run
-  against real endpoints.
+- **One host uses the server modules, on a branch.** Copycat's `adopt-package` branch
+  (2026-11-23, not merged at the time of writing) runs on the two agent providers, the
+  conversation store, the routine set, proposals and commands; `docs/adopting.md` lists
+  what that found. Skein and Toucan still run their own code. History, activity, threads,
+  profiles and the work log have no host: they are tested alone and together
+  (`test/together.test.mjs`) and will find gaps on first use.
+- **Run against a real agent once.** The Codex adapter was checked against the protocol
+  types `codex app-server generate-ts` produces (Codex CLI 0.171.0) and a fake server,
+  and then, through Copycat, against the signed-in Codex CLI for one short request (a
+  turn with activity and one edit). The one-shot presets, `http-chat` and the Somm
+  settings have not been run against real agents or endpoints.
 - **Server-only consumers still install the UI's dependencies.** The package has one
   dependency list, and React is a required peer. The server modules import none of it.
 - **No shared-text or CRDT module.** Each host still keeps its own draft, and Copycat's

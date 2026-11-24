@@ -15,7 +15,10 @@ branch `agent-chat` (`src/chat.js`, `src/live.js`, `src/agent.js`, `src/review.j
 and the parts cited), not line by line.
 
 "Extracted" means a module here was written from the hosts' code and is tested alone.
-**No host has been moved onto any of these modules yet**, so each still has to meet
+Copycat was moved onto the providers, the conversation store, the routine set, proposals
+and commands on 2026-11-23 (its branch `adopt-package`; see `docs/adopting.md`). **Skein
+and Toucan have not been moved onto any of these modules**, and history, activity,
+threads, profiles and the work log have no host yet, so each of those still has to meet
 its first real use.
 
 ## Summary
