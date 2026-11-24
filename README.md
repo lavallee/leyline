@@ -25,6 +25,7 @@ The package began as the chat panel only, and its name no longer fits. It stays
 | `./server/rpc` | `CodexRpc`: a JSON-RPC process transport over stdio. Unchanged. |
 | `./server/routines` | `createRoutineBank`: routine storage. Unchanged. |
 | `./server/providers` | One contract for agents, and three adapters. 0.3.0. |
+| `./server/providers/acp` | A fourth adapter: any agent that speaks the Agent Client Protocol. Unreleased. |
 | `./server/conversations` | The turn store: queue, lanes, persistence, recovery, stop. 0.3.0. |
 | `./server/commands` | How an agent with a shell reaches the host: a private key over loopback. 0.3.0. |
 | `./server/telemetry` | An optional hook, and an OTLP reporter that is off unless configured. 0.3.0. |
@@ -37,7 +38,7 @@ The package began as the chat panel only, and its name no longer fits. It stays
 | `./server/worklog` | What agents did: routine statistics, suggestions, and a per-document trail. 0.4.0. |
 
 Each adapter can also be imported alone: `./server/providers/codex-app-server`,
-`./server/providers/cli-oneshot`, `./server/providers/http-chat`.
+`./server/providers/cli-oneshot`, `./server/providers/http-chat`, `./server/providers/acp`.
 
 ## What stays in the host
 
@@ -78,7 +79,7 @@ send. The components and their props are the same as in 0.2.3.
 A provider turns one request into one reply, and may report what it is doing on the way.
 
 ```
-provider.name            'codex-app-server' | 'cli-oneshot' | 'http-chat'
+provider.name            'codex-app-server' | 'cli-oneshot' | 'http-chat' | 'acp'
 provider.capabilities    { activity, textStream, sessions, cancel, shell, structuredOutput }
 provider.run(request)    -> Promise<{ message, provenance, usage? }>
 provider.cancel(key)     stop the run for that key
@@ -240,6 +241,170 @@ await local.run({ messages: [{ role: 'user', content: 'Hello' }] });
 
 This adapter is tested against a local HTTP server that imitates both wires. It has not
 been run against a real provider.
+
+### acp
+
+Any agent that speaks the [Agent Client Protocol](https://agentclientprotocol.com/protocol/v1/overview)
+(ACP): Gemini CLI, OpenCode, Goose, and the others on the protocol's agents list. One child
+process, one ACP session per key, text and activity streamed while it works. The package
+plays the client, the part an editor plays.
+
+Implemented against **ACP protocol version 1**, read on 2026-11-23 from the specification
+(`https://agentclientprotocol.com/protocol/v1/` : overview, initialization, session-setup,
+prompt-turn, tool-calls, file-system, terminals, authentication, error, transports) and
+its JSON Schema, release `schema-v1.35.0`
+(`https://github.com/agentclientprotocol/agent-client-protocol/blob/main/schema/v1/schema.json`).
+Version 2 was a beta on that date and is not spoken; an agent that answers `initialize`
+with any other version is refused with a `ProviderError` that names it.
+
+```js
+import { AcpProvider, foldActivity } from '@lyra-forge/leyline/server/providers';   // or .../server/providers/acp
+
+const agent = new AcpProvider({
+  command: ['/usr/local/bin/gemini', '--acp'],     // an absolute path, from the host's configuration. `opencode acp`, `goose acp`, …
+  workDir: '/var/lib/myhost/agent-work',           // the child's folder, and the default session folder
+  clientInfo: { name: 'myhost', title: 'My Host', version: '1.0.0' },
+});
+const activities = [];
+const { message, provenance, usage } = await agent.run({
+  key: 'page-42:main',
+  instructions: 'You are working on one document with its owner.',
+  input: ['<document>…</document>', 'Tighten the second paragraph.'],
+  cwd: '/srv/site',                                // the session's folder; applies when the session starts
+  sessionId: saved,                                // optional: an id kept from an earlier provenance.sessionId
+  onEvent: event => foldActivity(activities, event),
+  onText: (piece, { segment }) => preview(piece, segment),
+  onDiff: diff => { /* { id, path, oldText, newText, status, … }: see below */ },
+  timeout: 900_000, idleTimeout: 120_000,
+});
+// provenance: { provider: 'acp', agent, agentVersion, model, sessionId, session: 'new' | 'kept' | 'loaded' | 'resumed', protocolVersion: 1, stopReason }
+```
+
+How `session/update` becomes the events every provider gives:
+
+| ACP | Here |
+| --- | --- |
+| `agent_message_chunk` (text) | `onText(piece, { segment })`. The last message of the turn is `message`; an earlier one (before a tool call, or under another `messageId`) becomes an activity titled "Agent note". `reply: 'all'` keeps every message, joined by blank lines. |
+| `agent_thought_chunk` | `{ kind: 'reasoning', append, status: 'running' }`, then `status: 'done'` when the agent moves on. |
+| `tool_call`, `tool_call_update` | `{ id: toolCallId, kind: 'activity', title, status, toolKind, command?, paths?, text? }`. `pending` and `in_progress` are `running`, `completed` is `done`, `failed` is `failed`. `toolKind` is ACP's kind (`read`, `edit`, `delete`, `move`, `search`, `execute`, `think`, `fetch`, `switch_mode`, `other`); `command` is `rawInput.command` of an `execute` call; `paths` are its locations and diff paths; `text` is its text content. |
+| tool call content of type `diff` | `onDiff({ id, toolCallId, index, path, oldText, newText, status, title, toolKind, key, sessionId })`, again whenever its text or status changes. |
+| `plan` | One activity with id `plan`, titled "Plan", one line per entry (`[ ]`, `[~]`, `[x]`); `done` when every entry is. |
+| `usage_update` | `usage.contextTokens`, `usage.contextSize`, `usage.cost`. |
+| `session/prompt` result | `end_turn`, `max_tokens`, `max_turn_requests` resolve (`provenance.stopReason` says which); `cancelled` rejects with code `stopped`; `refusal` with `failed`. |
+| everything else | Not mapped. `onUpdate(update)` receives every raw update of the turn. |
+
+What the agent may ask of the client, each a hook with a safe default:
+
+| Hook | Serves | Default |
+| --- | --- | --- |
+| `readFile(path, { key, sessionId, line, limit })` | `fs/read_text_file`. Return the text; return `undefined` to leave the path to the default reader; throw to refuse (the agent sees the message). | Reads only inside `roots` (checked as written and again after links are resolved). With no `roots` and no hook the capability is not advertised. |
+| `writeFile(path, content, { key, sessionId })` | `fs/write_text_file`. Throw to refuse. | Refused: without the hook the capability is not advertised. |
+| `onPermission(request, { signal })` | `session/request_permission`. May return a promise, so a person can be asked; the idle clock stops while it waits. Return an `optionId`, or a kind (`allow_once`, `allow_always`, `reject_once`, `reject_always`), or `'cancelled'`, or nothing to leave it to the policy. | The `permission` policy: `'deny'` (default) rejects; `'allow-read'` allows once a `read` or `search` call whose locations are all inside the session folder or `roots`. There is no allow-everything policy, and "once" is never widened to "always". |
+| `terminal: { create, output, waitForExit, kill, release }` | The five `terminal/*` methods. | Not offered: the capability is advertised only with all five. |
+
+Also:
+
+- **Sessions.** A key keeps its ACP session. `provenance.sessionId` is the agent's id for
+  it; pass it back as `sessionId` after a restart and the session is resumed
+  (`session/resume`, no replay) or loaded (`session/load`; the replayed history is
+  dropped, not taken for a reply) where the agent advertises either. If that fails, or the
+  agent can do neither, a new session starts and `provenance.session` is `'new'`, so a
+  host can tell memory was lost. After a crashed child the provider tries the same by itself.
+- **Instructions** go in `systemPrompt` (mode `append`) when the agent advertises it, and
+  otherwise at the head of the first prompt of a new session.
+- **MCP servers.** `mcpServers` (on the provider or a run) is passed to `session/new` in
+  ACP's shape. `http` and `sse` servers are refused with code `config` unless the agent
+  advertises them. Default: none.
+- **Authentication.** Nobody is signed in by this adapter. When the agent answers
+  `auth_required`, the run rejects with code `auth` and a message naming the method ids
+  the agent offered (also on `error.authMethods`). `authMethodId` sends one named
+  `agent`-type method to `authenticate` after `initialize`, for a method that needs no
+  person; a `terminal` method is never sent.
+- **Stopping.** `cancel(key)` and an aborted `signal` send `session/cancel` and answer any
+  open permission request `cancelled`; the run rejects with `stopped` and the session
+  survives. An agent that does not confirm within `cancelGrace` (10 s) loses its session.
+  A run past `timeout`, or silent for `idleTimeout`, is cancelled, rejects with `timeout`,
+  and its session is dropped. A dead child rejects what is in flight with `unavailable`;
+  the next run starts a new one. Lines on stdout that are not protocol messages are
+  skipped and handed to `onNoise`.
+- **It is not a sandbox.** An ACP agent runs its own tools in its own process, as the
+  user who started it. The hooks decide what it gets *through the client*; its own
+  permission mode and `onPermission` decide the rest. Many agents read and write files
+  directly and never call `fs/*`. A host that needs a hard boundary runs the command
+  inside one.
+
+#### The live draft, and a write that becomes a proposal
+
+`fs/read_text_file` exists so an agent reads what is in the editor, not what is on disk,
+and `fs/write_text_file` so the editor learns of a change. That is the same problem
+`./server/commands` solves for an agent with a shell. With the two hooks and
+`./server/proposals`, the agent reads the live draft and its write lands as an edit the
+person can see and undo:
+
+```js
+import { AcpProvider, diffToEdit } from '@lyra-forge/leyline/server/providers/acp';
+import { createProposals } from '@lyra-forge/leyline/server/proposals';
+
+const proposals = createProposals();
+let doc = { 'content.md': draftText };                    // the host's live draft
+const turns = new Map();                                  // conversation key -> the turn in flight
+const fileOf = name => name === '/srv/site/content.md' ? 'content.md' : null;
+
+const agent = new AcpProvider({
+  command, workDir,
+  readFile: name => { const part = fileOf(name); return part ? doc[part] : undefined; },
+  writeFile: (name, content, { key }) => {
+    const part = fileOf(name);
+    if (!part) throw new Error('Only the document can be written.');
+    const change = diffToEdit({ path: name, oldText: doc[part], newText: content }, { file: part });
+    if (!change.ok) throw new Error(change.problem);                  // the agent is told why
+    const made = proposals.make(turns.get(key), { ...change.edit, reason: 'Written by the agent' }, doc);
+    if (!made.ok) throw new Error(made.problem);
+    doc = made.doc;                                                   // applied, and undoable: proposals.undo(turn, 'e0', doc)
+  },
+});
+```
+
+`proposals.offer` in place of `make` holds the edit for the person instead; the agent's
+next read then still shows the old text, so say so in the instructions.
+
+`diffToEdit(diff, { file, current })` turns an ACP diff (`path`, `oldText`, `newText`,
+from `onDiff` or built from a write as above) into the text edit of `./server/proposals`:
+the smallest run of whole lines that covers the change and occurs exactly once, so it
+still applies while a person edits elsewhere. With `current` (the draft) "exactly once" is
+judged against the draft. When there is no such edit it returns `{ ok: false, code,
+problem }`: `new-file` (no old text), `empty-file`, `no-change`, `not-found` (the draft no
+longer has that text), `ambiguous`, `too-large`, `invalid`.
+
+A diff that arrives through `onDiff` reports what the agent is doing with *its own*
+tools. With `status: 'pending'` it has usually not been written yet, and the permission
+request that follows carries the same diff (`request.diffs`): a host can reject the
+request and offer the diff as a proposal instead. With `status: 'completed'` the file on
+disk has already changed.
+
+#### Run against real agents
+
+One small session each on 2026-11-24 (`node scripts/acp-real-agent.mjs gemini opencode goose`:
+initialize, a new session in an empty temporary folder, the prompt "Reply with the single
+word: ready", close), with no file or terminal capability offered:
+
+| Agent | Command | What happened |
+| --- | --- | --- |
+| OpenCode 2.2.5 | `opencode acp` | Worked. Protocol version 1; one `agent_message_chunk`, reply `ready`; model and token usage reported; advertises `loadSession` and `sessionCapabilities.resume`, `close`. |
+| Goose 1.33.1 | `goose acp` | Worked. Protocol version 1; one `agent_message_chunk`, reply `ready`; model and token usage reported; advertises `loadSession` and `sessionCapabilities.close`. |
+| Gemini CLI 0.66.0 | `gemini --acp` | **Not signed in on the test machine**, so no model call was made. `initialize` succeeded (protocol version 1, `loadSession`); `session/new` answered `auth_required`, and the run rejected with code `auth` naming `oauth-personal, gemini-api-key, vertex-ai, gateway`. |
+
+Those sessions had no thoughts, tool calls, plans, diffs, permission requests or `fs/*`
+calls in them, and no session was loaded or resumed: with real agents those paths are
+**untested**. They are covered by the unit tests, against a fake agent
+(`test/fixtures/fake-acp-agent.mjs`) written from the specification.
+
+Not implemented: `session/list`, `session/delete`, `session/set_mode`,
+`session/set_config_option` (so no choosing a model or a mode: the agent's own default
+applies), `logout`, terminal authentication, elicitation, `plan_update` and
+`plan_removed`, notices, compaction updates, subagent sessions, `$/cancel_request`,
+image, audio and resource prompt content (a prompt is text parts only), structured
+output, and any transport but stdio.
 
 ## Conversations
 
@@ -722,6 +887,10 @@ compiled or tested here; consumers build them.
   settings have not been run against real agents or endpoints.
 - **Server-only consumers still install the UI's dependencies.** The package has one
   dependency list, and React is a required peer. The server modules import none of it.
+- **The ACP adapter has met real agents once, briefly.** One one-word session each with
+  OpenCode and Goose; Gemini CLI was not signed in. Tool calls, permissions, `fs/*`, diffs
+  and session loading are tested only against a fake agent. See [acp](#acp) for what the
+  adapter does not implement, and note that it cannot confine an agent.
 - **No shared-text or CRDT module.** Each host still keeps its own draft, and Copycat's
   draft sync stays in Copycat.
 - **Reflexes, presence, the brief, the review log, plans and references are not here.**

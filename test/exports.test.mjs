@@ -50,6 +50,15 @@ test('0.4.0 adds one entry point per pattern', () => {
   for (const name of ['routine-set', 'history', 'proposals', 'activity', 'threads', 'profiles', 'worklog']) assert.equal(pkg.exports[`./server/${name}`], `./server/${name}.mjs`);
 });
 
+test('the ACP provider is its own entry point and is in the providers index', async () => {
+  assert.equal(pkg.exports['./server/providers/acp'], './server/providers/acp.mjs');
+  const alone = await import(`${pkg.name}/server/providers/acp`), index = await import(`${pkg.name}/server/providers`);
+  assert.equal(typeof alone.AcpProvider, 'function');
+  assert.equal(typeof alone.diffToEdit, 'function');
+  assert.equal(index.AcpProvider, alone.AcpProvider);
+  assert.equal(index.diffToEdit, alone.diffToEdit);
+});
+
 test('a rename is one step: only package.json, the README, the changelog and docs name the package', async () => {
   const short = pkg.name.replace(/^@[^/]+\//, ''), scope = pkg.name.split('/')[0];
   const walk = async dir => (await Promise.all((await readdir(path.join(root, dir), { withFileTypes: true })).map(e => e.isDirectory() ? walk(`${dir}/${e.name}`) : [`${dir}/${e.name}`]))).flat();
