@@ -11,7 +11,7 @@
     "test": "node --test test/*.test.mjs",
     "bench": "node bench/run.mjs",
     "soak": "node test/soak/soak.mjs",
-    "check": "for f in server/*.mjs server/providers/*.mjs src/*.mjs test/*.mjs test/fixtures/*.mjs test/soak/*.mjs bench/*.mjs bench/fixtures/*.mjs; do node --check \"$f\" || exit 1; done"
+    "check": "for f in server/*.mjs server/providers/*.mjs src/*.mjs test/*.mjs test/fixtures/*.mjs test/soak/*.mjs bench/*.mjs bench/fixtures/*.mjs bin/*.mjs; do node --check \"$f\" || exit 1; done"
   },
   "exports": {
     ".": "./src/index.tsx",
@@ -26,6 +26,7 @@
     "./app-bar": "./src/app-bar.tsx",
     "./side-panel": "./src/side-panel.tsx",
     "./history-panel": "./src/history-panel.tsx",
+    "./work-panel": "./src/work-panel.tsx",
     "./shell": "./src/shell.tsx",
     "./server/providers": "./server/providers/index.mjs",
     "./server/providers/codex-app-server": "./server/providers/codex-app-server.mjs",
@@ -41,6 +42,7 @@
     "./server/mcp": "./server/mcp.mjs",
     "./server/routine-set": "./server/routine-set.mjs",
     "./server/history": "./server/history.mjs",
+    "./server/dispatch": "./server/dispatch.mjs",
     "./server/proposals": "./server/proposals.mjs",
     "./server/activity": "./server/activity.mjs",
     "./server/threads": "./server/threads.mjs",
@@ -51,6 +53,7 @@
   "files": [
     "src",
     "server",
+    "bin",
     "docs",
     "LICENSE",
     "README.md",
@@ -74,5 +77,8 @@
   "homepage": "https://github.com/lavallee/leyline#readme",
   "bugs": {
     "url": "https://github.com/lavallee/leyline/issues"
+  },
+  "bin": {
+    "leyline-runner-command": "bin/runner-command.mjs"
   }
 }
