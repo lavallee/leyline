@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.8.0 (unreleased)
+
+The shell: the strip, side panel, routines and history that every one of our tools shows,
+moved here so none of them keeps its own copy (`docs/shell.md`).
+
+- `./app-bar`: `AppBar` (product, title, live dot, tag, status, actions), `AppBarButton`
+  (icon and a label that hides below 1024px, `pressed`, `count`, `attention`, `collapse`)
+  and `AppBarMore` (collapsed actions under one button on a phone).
+- `./side-panel`: `SidePanel`, the one panel at a time on the right, with `PanelNotice`
+  and `PanelError`. `placement="page"` fixes it below the strip over a page.
+- `./history-panel`: `HistoryPanel`, generalised from Toucan's History, over the rows
+  `./server/history` lists. A version is shown by `Preview` or by the host (`onPreview`).
+- `./routine-menu`: Toucan's richer menu folded in: groups by kind, search, a host's own
+  running routine on the trigger, and "From your work" suggestions. `onAskAgent` may now
+  be passed the text to draft. Existing props are unchanged; the trigger is an
+  `AppBarButton`, and `container` defaults to the strip's.
+
 ## 0.7.0 (2026-11-24)
 
 The plumbing `docs/landscape.md` found missing: a conversation is now a log of events a
