@@ -1,6 +1,6 @@
 {
   "name": "@lyra-forge/leyline",
-  "version": "0.9.0-dispatch.1",
+  "version": "0.9.0",
   "description": "The working parts of tools where people and coding agents share a document: a chat panel, agent providers, conversations, routines, history, proposals, activity, threads and profiles.",
   "type": "module",
   "license": "MIT",

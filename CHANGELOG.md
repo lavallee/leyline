@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.0 (unreleased)
+## 0.9.0 (2026-11-24)
 
 Dispatch: a document can hand work to something that does it elsewhere, and hear back
 (`docs/dispatch.md`).
