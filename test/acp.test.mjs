@@ -298,7 +298,7 @@ test('a run past its overall or idle timeout is stopped and its session dropped'
   const started = Date.now();
   await assert.rejects(provider.run({ key: 'b', input: 'hang', idleTimeout: 120 }), { code: 'timeout', message: 'The agent sent nothing for 0.1 seconds and was stopped.' });
   assert.ok(Date.now() - started < 2000);
-  assert.equal((await received('session/cancel')).length, 2, 'the agent is told to stop');
+  await until(async () => (await received('session/cancel')).length === 2);   // the agent is told to stop (its log is written a moment after the run rejects)
   assert.equal((await provider.run({ key: 'b', input: 'slow', idleTimeout: 200 })).message, '0 1 2 3 4 5 ', 'an agent that keeps talking is not idle, however long the turn');
   const quick = await setup(t, { idleTimeout: 120 });
   await assert.rejects(quick.provider.run({ key: 'a', input: 'hang' }), { code: 'timeout' }, 'the provider can set the idle limit for every run');

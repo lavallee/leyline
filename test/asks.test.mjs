@@ -87,6 +87,7 @@ test('Codex: an answer may take as long as a person does; the idle timeout waits
   provider.cancel('b');
   await assert.rejects(stopped, { code: 'stopped' });
   assert.equal(signal.aborted, true);
+  await until(async () => (await replies()).length === 2);   // the agent's record of the reply is written a moment after the run rejects
   assert.deepEqual((await replies()).at(-1), { decision: 'cancel' });
   // The agent takes a question back: nothing is sent in reply, and the listener is told.
   const count = (await replies()).length;
