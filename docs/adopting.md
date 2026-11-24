@@ -232,17 +232,27 @@ Reflexes, the brief, presence, plans, references and the review log stay in Touc
 
 ## 5. Copycat on 0.7.0: the stream, asks, steering, memory
 
-None of this is done in Copycat; Copycat `main` runs unchanged on 0.7.0 (its test and
-browser suites were run against a packed 0.7.0 on 2026-11-24). Each step below is
-independent and can ship alone. File and function names are Copycat's as of that date.
+None of this is done in Copycat. Copycat `main` (commit `7e727bf`) was run against a
+packed 0.7.0 on 2026-11-24 with no change to its code: step 0 says what that found.
+Each step below is independent and can ship alone. File and function names are
+Copycat's as of that date.
 
-**0. Nothing to migrate.** The chat files under `<state>/chats/` load as they are and
-get a log beside them on first change. Two things to know: anything that reads
-`chats/<key>.json` directly (a script, a backup) now sees a snapshot that can be behind
-while the server runs, so use `readConversation(dir, key)` or read after a clean
-shutdown; and going back to 0.6.0 is safe after `store.close()` has run (Copycat's
-`close()` should call `await this.store.close()` for that reason; today it only closes
-the agent).
+**0. Pin 0.7.0; nothing to migrate, two tests to change.** The chat files under
+`<state>/chats/` load as they are and get a log beside them on first change. What reads
+`chats/<key>.json` directly now sees a snapshot that can be behind while the server
+runs. Copycat's own code does not do that, but two of its tests do, and they are the
+only two of its 93 that fail on 0.7.0 (`tests/features.test.js`: "a chat file written
+before the shared store loads as it is…", which expects five turns in the file and
+finds the four of the snapshot, and "the server draft is the browser's text plus agent
+edits…", which expects a proposal in the file before the request ends). In both,
+replace `JSON.parse(await readFile(file, 'utf8'))` with
+`await readConversation(path.join(state, 'chats'), key)` (from
+`@lyra-forge/leyline/server/conversations`): the assertions themselves stay, because
+the change they look for is on disk, in the log. Scripts or backups that read those
+files should do the same, or read after a clean shutdown. Going back to 0.6.0 is safe
+after `store.close()` has run, which folds every log into its snapshot; Copycat's
+`close()` should `await this.store.close()` for that reason (today it only closes the
+agent).
 
 **1. Proposal fates: `store.save(key)` → `store.update()`.** In `agent()`
 (`src/chat.js`), `written()` calls `this.store.save(key)`, which now compares all 200
