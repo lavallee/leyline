@@ -76,7 +76,7 @@ export const commandLine = command => (Array.isArray(command) ? command.join(' '
 
 export class CodexAppServerProvider {
   name = 'codex-app-server';
-  capabilities = { activity: true, textStream: true, sessions: true, cancel: true, shell: true, structuredOutput: true, asks: true, steer: true };
+  capabilities = { activity: true, textStream: true, sessions: true, cancel: true, shell: true, structuredOutput: true, asks: true, steer: true, resume: true };
 
   /**
    * @param {object} options
@@ -117,6 +117,7 @@ export class CodexAppServerProvider {
     this.starting = new Set();  // host keys whose run has not reached its turn yet
     this.arriving = new Map();  // host key -> a promise that settles when such a run has reached its turn, or failed to
     this.totals = new Map();    // Codex thread id -> cumulative token usage
+    this.forgotten = new Set(); // thread ids that must not be taken up again
     this.ready = null;
   }
 
@@ -172,6 +173,12 @@ export class CodexAppServerProvider {
    * @param {string} [request.model] a model for this run, instead of the provider's
    * @param {number} [request.idleTimeout] milliseconds without any word from the agent about this run after which
    *   it is stopped with code 'timeout', as when `timeout` passes. Default: none
+   * @param {string} [request.threadId] a thread id saved from an earlier `provenance.threadId` (by this process or one
+   *   before it). Used when this provider holds no thread for the key: the thread is taken up again with `thread/resume`,
+   *   so the agent remembers the conversation across a restart. `provenance.memory` says what happened: 'kept' (the
+   *   thread was already held), 'resumed' (taken up again from the id), 'new' (a first thread), or 'lost' (the id was
+   *   given but the agent could not resume it, so a new thread was started). An id this provider was told to forget
+   *   (reset, or a run that had to be abandoned) is never resumed.
    * @param {'never'|'on-request'|'untrusted'|object} [request.approvalPolicy] when the agent asks before acting
    *   (Codex's AskForApproval). Default 'never': it never asks, and what the sandbox forbids simply fails. With
    *   'on-request' or 'untrusted' it sends approval requests, which go to `onAsk`.
@@ -185,7 +192,7 @@ export class CodexAppServerProvider {
    *   command's activity item (the item then holds the output as it came, instead of only its tail at the end).
    *   Default false, so a host's activity list is unchanged unless it asks.
    */
-  async run({ key, instructions, input, effort = 'low', sandbox = {}, outputSchema, threadConfig, model: asked, onEvent = () => {}, onText, streamOutput = false, onAsk, approvalPolicy = 'never', signal, timeout = 900000, idleTimeout } = {}) {
+  async run({ key, instructions, input, effort = 'low', sandbox = {}, outputSchema, threadConfig, threadId: saved, model: asked, onEvent = () => {}, onText, streamOutput = false, onAsk, approvalPolicy = 'never', signal, timeout = 900000, idleTimeout } = {}) {
     if (typeof key !== 'string' || !key) throw new ProviderError('Give the run a conversation key.', 'config');
     const parts = inputParts(input);
     if (!parts.length) throw new ProviderError('Give the run some input.', 'config');
@@ -212,31 +219,44 @@ export class CodexAppServerProvider {
         : { type: 'readOnly', ...(sandbox.network ? { networkAccess: true } : {}) };
       const named = asked || this.model;
       const model = named ? { model: named } : {};
-      let threadId = this.threads.get(key);
+      let threadId = this.threads.get(key), memory = threadId ? 'kept' : 'new';
+      const settings = { cwd, approvalPolicy, sandbox: write ? 'workspace-write' : 'read-only', ...(instructions ? { developerInstructions: instructions } : {}),
+        config: { ...this.disabled, ...this.threadConfig, ...threadConfig }, ...model };
+      const keep = response => {
+        const id = response?.thread?.id;
+        if (typeof id !== 'string' || !id) throw new ProviderError('The agent did not start a thread.', 'failed');
+        if (this.rpc === rpc) this.threads.set(key, id);
+        return id;
+      };
+      if (!threadId && typeof saved === 'string' && saved && !this.forgotten.has(saved) && ![...this.threads.values()].includes(saved)) {
+        // The conversation as the agent last knew it, from its own record of the thread. Its
+        // turns are not sent back to us (excludeTurns): the host has its own record of them.
+        const resumed = rpc.call('thread/resume', { threadId: saved, ...settings, excludeTurns: true }).then(keep, error => {
+          if (error?.code === 'rpc') { memory = 'lost'; return null; }   // the agent has no such thread any more: start again, and say so
+          throw fromRpc(error);
+        });
+        resumed.catch(() => {});
+        threadId = await Promise.race([resumed, halted]);
+        if (threadId) memory = 'resumed';
+      }
       if (!threadId) {
-        const thread = rpc.call('thread/start', { cwd, approvalPolicy, sandbox: write ? 'workspace-write' : 'read-only',
-          ...(instructions ? { developerInstructions: instructions } : {}), serviceName: this.serviceName,
-          config: { ...this.disabled, ...this.threadConfig, ...threadConfig }, ...model }).then(response => {
-          const id = response?.thread?.id;
-          if (typeof id !== 'string' || !id) throw new ProviderError('The agent did not start a thread.', 'failed');
-          if (this.rpc === rpc) this.threads.set(key, id);
-          return id;
-        }, error => { throw fromRpc(error); });
+        const thread = rpc.call('thread/start', { ...settings, serviceName: this.serviceName }).then(keep, error => { throw fromRpc(error); });
         thread.catch(() => {});
         threadId = await Promise.race([thread, halted]);
       }
       if (signal?.aborted) throw new ProviderError('Stopped.', 'stopped');
       if (this.rpc !== rpc) throw new ProviderError('The agent connection was closed.', 'unavailable');
-      return this.turn({ rpc, key, threadId, cwd, parts, effort, policy, outputSchema, model, asked, onEvent, onText, streamOutput, onAsk, approvalPolicy, signal, timeout, idleTimeout });
+      return this.turn({ rpc, key, threadId, memory, cwd, parts, effort, policy, outputSchema, model, asked, onEvent, onText, streamOutput, onAsk, approvalPolicy, signal, timeout, idleTimeout });
     } finally { this.starting.delete(key); this.arriving.delete(key); arrived(); signal?.removeEventListener('abort', halt); }
   }
 
   // Starts the turn and returns the promise that settles when it ends. The run is in
   // `pending` before this returns, so the key stays taken without a gap.
-  turn({ rpc, key, threadId, cwd, parts, effort, policy, outputSchema, model, asked, onEvent, onText, streamOutput, onAsk, approvalPolicy, signal, timeout, idleTimeout }) {
+  turn({ rpc, key, threadId, memory, cwd, parts, effort, policy, outputSchema, model, asked, onEvent, onText, streamOutput, onAsk, approvalPolicy, signal, timeout, idleTimeout }) {
     return new Promise((resolve, reject) => {
       const abort = () => this.cancel(key);
-      const run = { key, threadId, model: asked, text: '', turnId: null, cancelled: false, onEvent, parts: new Set(), usageStart: this.totals.get(threadId) || ZERO,
+      // What a thread taken up again had used before is not known until its first usage report: see event().
+      const run = { key, threadId, memory, model: asked, text: '', turnId: null, cancelled: false, onEvent, parts: new Set(), usageStart: this.totals.get(threadId) || (memory === 'resumed' ? null : ZERO),
         onAsk: typeof onAsk === 'function' ? onAsk : null, asking: new Map(), waiting: 0,
         onText: typeof onText === 'function' ? onText : null, streamOutput: !!streamOutput, batch: createBatcher(this.streamBatch), messages: new Map(), segments: 0, streamed: new Set(),
         finish: (error, result) => {
@@ -248,8 +268,8 @@ export class CodexAppServerProvider {
           error ? reject(error) : resolve(result);
         } };
       run.named = new Promise(done => { run.name = done; });   // settles when the agent has named the turn, or the run is over
-      run.timer = setTimeout(() => { this.cancel(key); this.threads.delete(key); run.finish(new ProviderError('The request ran out of time and was stopped.', 'timeout')); }, Math.min(Math.max(0, Number(timeout) || 0), 2 ** 31 - 1));
-      const expire = () => { this.cancel(key); this.threads.delete(key); run.finish(new ProviderError('The agent went quiet and was stopped.', 'timeout')); };
+      run.timer = setTimeout(() => { this.cancel(key); this.forget(key); run.finish(new ProviderError('The request ran out of time and was stopped.', 'timeout')); }, Math.min(Math.max(0, Number(timeout) || 0), 2 ** 31 - 1));
+      const expire = () => { this.cancel(key); this.forget(key); run.finish(new ProviderError('The agent went quiet and was stopped.', 'timeout')); };
       // Called for every notification about this run: the quiet period starts again.
       // While the agent is waiting on a person it is not the agent that is quiet: the clock is paused.
       run.heard = () => { clearTimeout(run.idle); if (!(idleTimeout > 0) || run.waiting > 0) return; run.idle = setTimeout(expire, Math.min(idleTimeout, 2 ** 31 - 1)); };
@@ -353,8 +373,14 @@ export class CodexAppServerProvider {
   event(message) {
     const method = message?.method, p = message?.params && typeof message.params === 'object' ? message.params : {};
     const threadId = p.threadId || p.turn?.threadId;
-    if (method === 'thread/tokenUsage/updated' && p.tokenUsage?.total && typeof p.tokenUsage.total === 'object') this.totals.set(threadId, p.tokenUsage.total);
-    const run = this.pending.get(threadId); if (!run) return;
+    const run = this.pending.get(threadId);
+    if (method === 'thread/tokenUsage/updated' && p.tokenUsage?.total && typeof p.tokenUsage.total === 'object') {
+      const total = p.tokenUsage.total, last = p.tokenUsage.last;
+      // The first report on a thread taken up again: what it had used before this run is the total less this report's own part.
+      if (run && run.usageStart === null && last && typeof last === 'object') run.usageStart = Object.fromEntries(Object.keys(ZERO).map(name => [name, Math.max(0, (Number(total[name]) || 0) - (Number(last[name]) || 0))]));
+      this.totals.set(threadId, total);
+    }
+    if (!run) return;
     run.heard?.();
     const emit = event => { try { run.onEvent(event); } catch { /* a host's handler must not break the run */ } };
     const item = p.item && typeof p.item === 'object' ? p.item : {};
@@ -414,13 +440,20 @@ export class CodexAppServerProvider {
       if (p.turn?.status !== 'completed') return run.finish(p.turn?.status === 'interrupted'
         ? new ProviderError('Stopped.', 'stopped') : new ProviderError(p.turn?.error?.message || 'The request stopped.', 'failed'));
       const total = this.totals.get(threadId);
-      const usage = total ? Object.fromEntries(Object.keys(ZERO).map(name => [name, Math.max(0, (Number(total[name]) || 0) - (Number(run.usageStart[name]) || 0))])) : undefined;
-      run.finish(null, { message: run.text, provenance: { provider: this.name, model: run.model || this.model || 'provider default', threadId }, ...(usage ? { usage } : {}) });
+      const usage = total && run.usageStart ? Object.fromEntries(Object.keys(ZERO).map(name => [name, Math.max(0, (Number(total[name]) || 0) - (Number(run.usageStart[name]) || 0))])) : undefined;
+      run.finish(null, { message: run.text, provenance: { provider: this.name, model: run.model || this.model || 'provider default', threadId, memory: run.memory }, ...(usage ? { usage } : {}) });
     }
   }
 
-  /** Forgets the thread for `key`: the next run on it starts a fresh agent. */
-  reset(key) { const threadId = this.threads.get(key); this.threads.delete(key); if (threadId) this.totals.delete(threadId); }
+  /** Forgets the thread for `key`: the next run on it starts a fresh agent, even if it is handed the old thread's id. */
+  reset(key) { this.forget(key); }
+  forget(key) {
+    const threadId = this.threads.get(key); this.threads.delete(key);
+    if (!threadId) return;
+    this.totals.delete(threadId);
+    this.forgotten.add(threadId);
+    if (this.forgotten.size > 2000) this.forgotten.delete(this.forgotten.values().next().value);
+  }
   close() {
     const rpc = this.rpc; this.rpc = null; this.ready = null;
     for (const run of [...this.pending.values()]) run.finish(new ProviderError('The agent connection was closed.', 'unavailable'));

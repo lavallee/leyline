@@ -1,9 +1,12 @@
 // A stand-in for `codex app-server` in tests: JSON-RPC on stdio, no model. What it does
 // with a turn is chosen by the turn's input text. Everything it receives is appended to
 // the file named by FAKE_LOG, one JSON value per line.
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import readline from 'node:readline';
 
+// With FAKE_THREADS (a file), threads outlive the process, as Codex's rollouts do: thread/resume finds them again.
+const kept = () => { try { return JSON.parse(readFileSync(process.env.FAKE_THREADS, 'utf8')); } catch { return {}; } };
+const keep = (id, state) => { if (process.env.FAKE_THREADS) writeFileSync(process.env.FAKE_THREADS, JSON.stringify({ ...kept(), [id]: state })); };
 const log = value => { if (process.env.FAKE_LOG) appendFileSync(process.env.FAKE_LOG, JSON.stringify(value) + '\n'); };
 const send = message => process.stdout.write(JSON.stringify(message) + '\n');
 const note = (method, params) => send({ method, params });
@@ -48,8 +51,14 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   if (method === 'model/list') return send({ id, result: { data: [{ id: 'other' }, { id: 'fake-model', isDefault: true }] } });
   if (method === 'thread/start') {
     if (process.env.FAKE_DIE_ON_THREAD) return process.exit(1);
-    const thread = `t${++seq}`; threads.set(thread, { turns: 0, total: 0 });
+    const thread = process.env.FAKE_THREADS ? `t-${process.pid}-${++seq}` : `t${++seq}`; threads.set(thread, { turns: 0, total: 0 }); keep(thread, threads.get(thread));
     return setTimeout(() => send({ id, result: { thread: { id: thread } } }), Number(process.env.FAKE_SLOW_THREAD || 0));
+  }
+  if (method === 'thread/resume') {
+    const state = threads.get(params.threadId) || (process.env.FAKE_THREADS ? kept()[params.threadId] : null);
+    if (!state) return send({ id, error: { code: -32600, message: `no rollout found for thread id ${params.threadId}` } });
+    threads.set(params.threadId, state);
+    return send({ id, result: { thread: { id: params.threadId, turns: [] } } });
   }
   if (method === 'turn/interrupt') {
     send({ id, result: {} });
@@ -143,8 +152,9 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     note('item/completed', { threadId, item: { id: 'm0', type: 'agentMessage', phase: 'commentary', text: 'Looking around first.' } });
     note('item/completed', { threadId, item: { id: 'm1', type: 'agentMessage', text: 'Halfway there.' } });
     note('item/completed', { threadId, item: { id: 'm2', type: 'agentMessage', text: `turn ${state.turns}: ${text}` } });
-    state.total += 100;
-    note('thread/tokenUsage/updated', { threadId, turnId, tokenUsage: { total: { totalTokens: state.total * 1.5, inputTokens: state.total, cachedInputTokens: 0, outputTokens: state.total / 2, reasoningOutputTokens: 10 * state.turns }, last: {} } });
+    state.total += 100; keep(threadId, state);
+    note('thread/tokenUsage/updated', { threadId, turnId, tokenUsage: { total: { totalTokens: state.total * 1.5, inputTokens: state.total, cachedInputTokens: 0, outputTokens: state.total / 2, reasoningOutputTokens: 10 * state.turns },
+      last: { totalTokens: 150, inputTokens: 100, cachedInputTokens: 0, outputTokens: 50, reasoningOutputTokens: 10 } } });
     note('turn/completed', { threadId, turn: { id: turnId, status: 'completed' } });
   }
 });

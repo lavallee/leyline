@@ -132,7 +132,7 @@ export function sliceLines(content, line, limit) {
 
 export class AcpProvider {
   name = 'acp';
-  capabilities = { activity: true, textStream: true, sessions: true, cancel: true, shell: true, structuredOutput: false, asks: true, steer: false };
+  capabilities = { activity: true, textStream: true, sessions: true, cancel: true, shell: true, structuredOutput: false, asks: true, steer: false, resume: true };
 
   /**
    * @param {object} options
@@ -192,6 +192,7 @@ export class AcpProvider {
     this.sessions = new Map();  // host key -> { sessionId, cwd, model, roots, first }
     this.known = new Map();     // host key -> the last session id, kept across a crash so the session can be loaded again
     this.keys = new Map();      // session id -> host key
+    this.forgotten = new Set(); // session ids that must not be loaded again (reset, or a run that had to be abandoned)
     this.runs = new Map();      // host key -> the run in flight
     this.agent = null;          // { info, capabilities, authMethods } once initialised
     this.ready = null;
@@ -321,7 +322,9 @@ export class AcpProvider {
     const usage = { ...counts, ...(run.context ? { contextTokens: run.context.used, contextSize: run.context.size, ...(run.context.cost ? { cost: run.context.cost } : {}) } : {}) };
     run.finish(null, { message: this.reply === 'all' ? run.all : run.text,
       provenance: { provider: this.name, agent: info.name || path.basename(this.command[0]), ...(info.version ? { agentVersion: info.version } : {}),
-        model: session.model || 'agent default', sessionId: session.sessionId, session: run.how, protocolVersion: ACP_PROTOCOL_VERSION, stopReason: stop || 'end_turn' },
+        model: session.model || 'agent default', sessionId: session.sessionId, session: run.how,
+        // The same word every provider uses: 'kept', 'resumed' (loaded or resumed from a saved id), 'new', or 'lost' (a saved id the agent could not take up).
+        memory: run.how === 'kept' ? 'kept' : run.how === 'new' ? (run.offered ? 'lost' : 'new') : 'resumed', protocolVersion: ACP_PROTOCOL_VERSION, stopReason: stop || 'end_turn' },
       ...(Object.keys(usage).length ? { usage } : {}) });
   }
 
@@ -343,7 +346,8 @@ export class AcpProvider {
       return session;
     };
     const saved = run.savedId || this.known.get(run.key);
-    if (typeof saved === 'string' && saved && (can.resume || caps.loadSession)) {
+    if (typeof saved === 'string' && saved && !this.forgotten.has(saved) && (can.resume || caps.loadSession)) {
+      run.offered = true;
       // session/load replays the conversation as session/update notifications before it
       // answers. They are routed to this run while its phase is 'setup', and dropped.
       this.keys.set(saved, run.key);
@@ -576,8 +580,9 @@ export class AcpProvider {
 
   /** Forgets the session for `key`: the next run on it starts a fresh one. The agent is told to close it where it can. */
   reset(key) {
-    const session = this.sessions.get(key);
+    const session = this.sessions.get(key), id = session?.sessionId || this.known.get(key);
     this.sessions.delete(key); this.known.delete(key);
+    if (id) { this.forgotten.add(id); if (this.forgotten.size > 2000) this.forgotten.delete(this.forgotten.values().next().value); }
     if (!session) return;
     this.keys.delete(session.sessionId);
     if (this.rpc && this.agent?.capabilities?.sessionCapabilities?.close) this.rpc.call('session/close', { sessionId: session.sessionId }, 10000).catch(() => {});

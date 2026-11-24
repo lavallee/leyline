@@ -233,7 +233,9 @@ export async function readConversation(dir, key) {
  *   into turn.activities; `text` adds a piece of the reply to turn.preview while it arrives (the field is
  *   removed when the turn finishes and `message` holds the reply); `save` records what the host changed
  *   on the turn itself; `ask(question, { timeout, signal })` puts a question for a person on the turn
- *   (turn.asks) and resolves with the answer: pass it to a provider as `onAsk`; `steering(fn)` tells the
+ *   (turn.asks) and resolves with the answer: pass it to a provider as `onAsk`; `resume` is what the main
+ *   lane's agent needs to take its memory up again after a restart ({ threadId } or { sessionId }, from the
+ *   provenance of the last turn that succeeded; {} when there is none): spread it into provider.run(); `steering(fn)` tells the
  *   store how to send more input into this run (for a provider that can: `tools.steering(input =>
  *   provider.steer(lane.id, input))`), which is what store.steer() then calls.
  * @param {number} [options.maxLanes] requests running at once per conversation; default 4
@@ -633,6 +635,17 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
     if (!queue.length) queues.delete(key);
   }
 
+  // The main lane's agent keeps its memory in a thread or session of its own. Its id is in
+  // each result's provenance; the last one is kept with the conversation (conversation.memory)
+  // and handed to the next run as tools.resume, so memory survives a restart of the host.
+  const resumeOf = saved => saved && typeof saved === 'object' ? Object.fromEntries(['threadId', 'sessionId'].filter(name => typeof saved[name] === 'string' && saved[name]).map(name => [name, saved[name]])) : {};
+  function remember(conversation, lane, provenance) {
+    const ids = resumeOf(provenance);
+    if (!Object.keys(ids).length) return;
+    const next = { ...(typeof provenance.provider === 'string' ? { provider: provenance.provider } : {}), ...ids }, memory = conversation.memory && typeof conversation.memory === 'object' ? conversation.memory : {};
+    if (JSON.stringify(memory[lane.name]) !== JSON.stringify(next)) conversation.memory = { ...memory, [lane.name]: next };
+  }
+
   async function execute(conversation, { turn, payload }, runtime) {
     const { lane, controller } = runtime, log = logs.get(conversation.key);
     // Once the turn has its final status nothing more is recorded on it, whatever a run that outlived it does.
@@ -709,13 +722,16 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
       if (controller.signal.aborted) throw new Error(MESSAGES.stopped);   // stopped before it began: the host's run is never called
       // `entered` settles once run() has been called and has done whatever it does before its first wait
       // (which is where it says how it can be steered), or once it is known that it never will be.
-      const work = Promise.resolve().then(() => { try { return run(turn, lane, controller.signal, { payload, conversation, activity, text, ask, steering: fn => { runtime.steer = typeof fn === 'function' ? fn : null; }, save: () => save() }); } finally { runtime.enter(); } });
+      const resume = lane.main ? resumeOf(conversation.memory?.[lane.name]) : {};
+      const work = Promise.resolve().then(() => { try { return run(turn, lane, controller.signal, { payload, conversation, activity, text, ask, resume, steering: fn => { runtime.steer = typeof fn === 'function' ? fn : null; }, save: () => save() }); } finally { runtime.enter(); } });
       work.catch(() => {});
       result = await Promise.race([work, new Promise((_, reject) => { runtime.abandon = () => reject(new Error(MESSAGES.stopped)); })]);
       if (controller.signal.aborted) throw new Error(MESSAGES.stopped);
       const { id, status, activities, ...fields } = result && typeof result === 'object' ? result : {};
       delete fields.__proto__;
       Object.assign(turn, fields, { status: 'succeeded', message: typeof fields.message === 'string' ? fields.message : '' });
+      // Where the agent's memory of this conversation lives, kept so that a later process can take it up again.
+      if (lane.main) remember(conversation, lane, fields.provenance);
     } catch (error) {
       failure = error;
       const stopped = controller.signal.aborted;
@@ -854,6 +870,7 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
         await write(path.join(archive, `${now().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 6)}.json`), JSON.stringify(conversation, null, 2));
       }
       conversation.turns = [];
+      delete conversation.memory;                               // a new conversation: the agent's memory of the old one is not taken up again
       log.shadows.clear(); log.dirty.clear();
       emit(log, { type: 'reset' });
       log.compact = true;                                       // the empty conversation is a new snapshot, and the log starts again
@@ -957,6 +974,11 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
     compact: async key => { const conversation = await open(key), log = logs.get(key); if (log.lines || log.pending.length || !log.snapshot) log.compact = true; return persist(conversation, true); },
     /** The position of a conversation's stream now: { cursor, epoch, seq }, or undefined before open(). */
     position: key => { const log = logs.get(key); return log && { cursor: formatCursor(log.epoch, log.seq), epoch: log.epoch, seq: log.seq }; },
+    /**
+     * Forgets where the agent's memory of a conversation lives (conversation.memory), so the next run starts a
+     * fresh agent instead of resuming. reset() does this too. The provider's own reset(key) is the host's to call.
+     */
+    forget: async key => { const conversation = await open(key); if (conversation.memory === undefined) return false; delete conversation.memory; await persist(conversation); return true; },
     /** How many subscribers a loaded conversation has. */
     subscribers: key => logs.get(key)?.subscribers.size ?? 0,
     /** Resolves when every write so far has reached the disk. */

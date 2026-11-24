@@ -75,7 +75,7 @@ const textOf = content => typeof content === 'string' ? content
 
 export class HttpChatProvider {
   name = 'http-chat';
-  capabilities = { activity: false, textStream: true, sessions: true, cancel: true, shell: false, structuredOutput: false, asks: false, steer: false };
+  capabilities = { activity: false, textStream: true, sessions: true, cancel: true, shell: false, structuredOutput: false, asks: false, steer: false, resume: false };
 
   /**
    * @param {object} options

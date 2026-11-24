@@ -61,7 +61,7 @@ test('a turn streams text, thoughts, tool calls, a plan and diffs as normalised 
   assert.deepEqual(pieces, [['Looking ', 0], ['around first.', 0], ['turn 1: <draft>hello</draft> | tidy it', 1]]);
   const { sessionId, ...provenance } = result.provenance;
   assert.match(sessionId, /^s1-\d+$/);
-  assert.deepEqual(provenance, { provider: 'acp', agent: 'fake-agent', agentVersion: '0.0.1', model: 'fake-model', session: 'new', protocolVersion: 1, stopReason: 'end_turn' });
+  assert.deepEqual(provenance, { provider: 'acp', agent: 'fake-agent', agentVersion: '0.0.1', model: 'fake-model', session: 'new', memory: 'new', protocolVersion: 1, stopReason: 'end_turn' });
   assert.deepEqual(result.usage, { contextTokens: 1200, contextSize: 200000, cost: { amount: 0.01, currency: 'USD' } });
 
   for (const event of events) {

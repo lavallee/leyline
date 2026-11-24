@@ -19,7 +19,7 @@ test('a run streams normalised activity and resolves with the last message', asy
   const result = await provider.run({ key: 'doc:main', instructions: 'Be brief.', input: ['<draft>hello</draft>', 'tidy it'],
     onEvent: event => { events.push(event); foldActivity(items, event); } });
   assert.equal(result.message, 'turn 1: <draft>hello</draft> | tidy it');
-  assert.deepEqual(result.provenance, { provider: 'codex-app-server', model: 'fake-model', threadId: 't1' });
+  assert.deepEqual(result.provenance, { provider: 'codex-app-server', model: 'fake-model', threadId: 't1', memory: 'new' });
   assert.deepEqual(result.usage, { inputTokens: 100, cachedInputTokens: 0, outputTokens: 50, reasoningOutputTokens: 10, totalTokens: 150 });
 
   for (const event of events) {

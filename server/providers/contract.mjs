@@ -6,7 +6,9 @@
 // with the reply.
 //
 //   provider.name            a short string: 'codex-app-server', 'cli-oneshot', 'http-chat'
-//   provider.capabilities    { activity, textStream, sessions, cancel, shell, structuredOutput, asks, steer }
+//   provider.capabilities    { activity, textStream, sessions, cancel, shell, structuredOutput, asks, steer, resume }
+//                            (`resume`: a run can be handed the id of an earlier process's thread or session and
+//                            take the agent's memory up again; `provenance.memory` then says 'resumed' or 'lost')
 //                            (`asks`: the agent's questions can wait for a person through `onAsk`)
 //   provider.run(request)    -> Promise<{ message, provenance, usage? }>
 //   provider.steer(key, input)  only where `capabilities.steer`: send more input into the run in flight for that
@@ -56,7 +58,9 @@
 //
 // result:
 //   message      the reply text
-//   provenance   { provider, model, ... } for the host's records
+//   provenance   { provider, model, ... } for the host's records. Providers with `sessions` add `memory`:
+//                'new' (a first thread or session), 'kept' (the one this provider already held), 'resumed' (taken
+//                up again from a saved id, after a restart) or 'lost' (a saved id was given and could not be)
 //   usage        { inputTokens, outputTokens, ... } when the provider reports it
 
 /** An error a provider raises on purpose. `code` is stable; `message` is for people. */
