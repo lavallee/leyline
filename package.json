@@ -9,7 +9,8 @@
   },
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "check": "for f in server/*.mjs server/providers/*.mjs src/*.mjs test/*.mjs test/fixtures/*.mjs; do node --check \"$f\" || exit 1; done"
+    "bench": "node bench/run.mjs",
+    "check": "for f in server/*.mjs server/providers/*.mjs src/*.mjs test/*.mjs test/fixtures/*.mjs bench/*.mjs bench/fixtures/*.mjs; do node --check \"$f\" || exit 1; done"
   },
   "exports": {
     ".": "./src/index.tsx",
