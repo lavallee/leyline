@@ -488,10 +488,10 @@ test('random interleavings of send, stop, reset, save and restart keep the store
       } finally { inLane.delete(lane.id); }
     } });
     let store = open();
-    const keys = ['a', 'b', 'weird/key?'];
+    const keys = ['a', 'b', 'weird/key?'], outstanding = [];
     for (let step = 0; step < 160; step++) {
       const key = keys[Math.floor(next() * keys.length)], roll = next(), turns = store.get(key)?.turns ?? [];
-      if (roll < 0.4) store.send(key, { user: `s${step}` }).then(turn => acknowledged.set(turn.id, key), error => { if (!['full', 'busy', 'closed'].includes(error.code)) problems.push(`send: ${error.message}`); });
+      if (roll < 0.4) outstanding.push(store.send(key, { user: `s${step}` }).then(turn => acknowledged.set(turn.id, key), error => { if (!['full', 'busy', 'closed'].includes(error.code)) problems.push(`send: ${error.message}`); }));
       else if (roll < 0.6) { const gate = [...gates][Math.floor(next() * gates.size)]; if (gate) { gates.delete(gate); gate.resolve(); } }
       else if (roll < 0.7 && turns.length) store.stop(key, turns[Math.floor(next() * turns.length)].id).catch(e => { if (e.code !== 'closed') problems.push(`stop: ${e.message}`); });
       else if (roll < 0.75) store.stopAll(key).catch(e => { if (e.code !== 'closed') problems.push(`stopAll: ${e.message}`); });
@@ -501,6 +501,8 @@ test('random interleavings of send, stop, reset, save and restart keep the store
       if (next() < 0.5) await sleep(Math.floor(next() * 3)); else await ticks(Math.floor(next() * 6));
       for (const k of keys) if (store.lanes(k).length > 3) problems.push('more lanes than the cap');
     }
+    // Every send has been answered (one still loading its conversation is not yet work the store can see), then every turn has finished.
+    await Promise.all(outstanding);
     await until(() => { for (const gate of gates) gate.resolve(); gates.clear(); return keys.every(key => !store.busy(key)); }, 60000);
     await store.flush(); await sleep(10); await store.flush();
     // Memory and disk agree, nothing is left unfinished, and every request the store accepted is in its conversation or an archive.
