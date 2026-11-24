@@ -512,11 +512,14 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
       try {
         const file = path.join(dir, fileNameFor(key)), logFile = path.join(dir, logNameFor(key));
         const unreadable = error => Object.assign(new ConversationError(words.unreadable, 'unreadable'), { cause: error });
-        let stored = { key, turns: [] }, recovered = false, text, base = 0, snapshot = false, repair = false;
+        let stored = { key, turns: [] }, recovered = false, base = 0, snapshot = false, repair = false;
         // Only a file that is not there means "none yet". Any other failure to read it is
         // reported and nothing is assumed, or the next write would replace a file that may be whole.
+        // The snapshot and the log are asked for together; the log is looked at after the snapshot.
+        const reading = readFile(logFile).then(bytes => ({ bytes }), error => ({ error }));
+        let text;
         try { text = await readFile(file, 'utf8'); }
-        catch (error) { if (!absent(error)) throw unreadable(error); }
+        catch (error) { await reading; if (!absent(error)) throw unreadable(error); }
         if (text !== undefined) {
           let read = null, problem = null;
           try { read = JSON.parse(text); } catch { problem = 'corrupt'; }
@@ -530,9 +533,9 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
           }
         }
         // The events since the snapshot.
-        let bytes = null, seq = base, lines = 0, size = 0, header = false;
-        try { bytes = await readFile(logFile); }
-        catch (error) { if (!absent(error)) throw unreadable(error); }
+        let seq = base, lines = 0, size = 0, header = false;
+        const { bytes = null, error: logError } = await reading;
+        if (logError && !absent(logError)) throw unreadable(logError);
         if (bytes) {
           const read = readLog(bytes, key, base);
           let problem = read.problem === 'foreign' ? 'foreign' : null;

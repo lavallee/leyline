@@ -10,231 +10,249 @@
  "results": [
   {
    "name": "store: 1 activity update on a running turn",
-   "value": 3.596,
+   "value": 4.682,
    "unit": "ms",
-   "rssMb": 58
+   "rssMb": 61
   },
   {
    "name": "store: 100 activity updates on a running turn",
-   "value": 5.143,
+   "value": 6.44,
    "unit": "ms",
-   "rssMb": 59
+   "rssMb": 61
   },
   {
    "name": "store: 100 activity updates on a running turn",
-   "value": 19446,
+   "value": 15529,
    "unit": "updates/s",
-   "rssMb": 59
+   "rssMb": 61
   },
   {
    "name": "store: 1,000 activity updates on a running turn",
-   "value": 10.31,
+   "value": 13.27,
    "unit": "ms",
-   "rssMb": 66
+   "rssMb": 69
   },
   {
    "name": "store: 1,000 activity updates on a running turn",
-   "value": 97029,
+   "value": 75355,
    "unit": "updates/s",
-   "rssMb": 66
+   "rssMb": 69
   },
   {
    "name": "store: 10,000 activity updates on a running turn",
-   "value": 38.07,
+   "value": 51,
    "unit": "ms",
-   "rssMb": 72
+   "rssMb": 76
   },
   {
    "name": "store: 10,000 activity updates on a running turn",
-   "value": 262684,
+   "value": 196094,
    "unit": "updates/s",
-   "rssMb": 72
+   "rssMb": 76
   },
   {
    "name": "store: open 1,000 conversations (10 turns each, 100 recovered)",
-   "value": 405.9,
+   "value": 562.7,
    "unit": "ms",
-   "rssMb": 535
+   "rssMb": 589
   },
   {
    "name": "store: open 1,000 conversations (10 turns each, 100 recovered)",
-   "value": 0.4059,
+   "value": 0.5627,
    "unit": "ms/conversation",
-   "rssMb": 535
+   "rssMb": 589
   },
   {
    "name": "store: open 1,000 conversations at once",
-   "value": 261.3,
+   "value": 468.5,
    "unit": "ms",
-   "rssMb": 535
+   "rssMb": 589
   },
   {
    "name": "store: 200-turn conversation, open",
-   "value": 5.229,
+   "value": 10.16,
    "unit": "ms",
-   "rssMb": 86
+   "rssMb": 91
   },
   {
    "name": "store: 200-turn conversation, one activity update written",
-   "value": 9.416,
+   "value": 0.1565,
    "unit": "ms/update",
-   "rssMb": 86
+   "rssMb": 91
   },
   {
    "name": "store: 200-turn conversation, file size",
-   "value": 1697,
+   "value": 1687,
    "unit": "KB",
-   "rssMb": 86
+   "rssMb": 91
+  },
+  {
+   "name": "store: 200-turn conversation, save(key) after changing one finished turn",
+   "value": 2.217,
+   "unit": "ms/save",
+   "rssMb": 91
+  },
+  {
+   "name": "store: 200-turn conversation, update() of one finished turn",
+   "value": 0.109,
+   "unit": "ms/update",
+   "rssMb": 91
+  },
+  {
+   "name": "store: 200-turn conversation, fold the log into a new snapshot",
+   "value": 12.68,
+   "unit": "ms",
+   "rssMb": 91
   },
   {
    "name": "store: 150 requests sent at once, all finished and written",
-   "value": 169.8,
+   "value": 17.05,
    "unit": "ms",
-   "rssMb": 86
+   "rssMb": 91
   },
   {
    "name": "rpc: 100,000 notifications through the line reader",
-   "value": 176.2,
+   "value": 156,
    "unit": "ms",
-   "rssMb": 62
+   "rssMb": 64
   },
   {
    "name": "rpc: 100,000 notifications through the line reader",
-   "value": 567673,
+   "value": 641097,
    "unit": "lines/s",
-   "rssMb": 62
+   "rssMb": 64
   },
   {
    "name": "sse: 100,000 events, 16 KB chunks",
-   "value": 92.12,
+   "value": 80.07,
    "unit": "ms",
-   "rssMb": 200
+   "rssMb": 198
   },
   {
    "name": "sse: 100,000 events, 16 KB chunks",
-   "value": 1085577,
+   "value": 1248914,
    "unit": "events/s",
-   "rssMb": 200
+   "rssMb": 198
   },
   {
    "name": "sse: 100,000 events, 64-byte chunks",
-   "value": 275.9,
+   "value": 219.6,
    "unit": "ms",
-   "rssMb": 200
+   "rssMb": 198
   },
   {
    "name": "sse: 100,000 events, 64-byte chunks",
-   "value": 362421,
+   "value": 455470,
    "unit": "events/s",
-   "rssMb": 200
+   "rssMb": 198
   },
   {
    "name": "sse: one 4 MB event in 1 KB chunks",
-   "value": 7.784,
+   "value": 7.266,
    "unit": "ms",
-   "rssMb": 200
+   "rssMb": 198
   },
   {
    "name": "proposals: make 500 edits on a 1 MB document",
-   "value": 503.9,
+   "value": 444.8,
    "unit": "ms",
-   "rssMb": 130
+   "rssMb": 135
   },
   {
    "name": "proposals: make 500 edits on a 1 MB document",
-   "value": 1.008,
+   "value": 0.8895,
    "unit": "ms/edit",
-   "rssMb": 130
+   "rssMb": 135
   },
   {
    "name": "proposals: undo all 500 edits",
-   "value": 550.5,
+   "value": 482.2,
    "unit": "ms",
-   "rssMb": 130
+   "rssMb": 135
   },
   {
    "name": "proposals: refuse a one-letter find that occurs a million times",
-   "value": 0.7035,
+   "value": 0.6555,
    "unit": "ms",
-   "rssMb": 130
+   "rssMb": 135
   },
   {
    "name": "proposals: refuse a 2,000-letter find that occurs a million times",
-   "value": 0.3326,
+   "value": 0.3032,
    "unit": "ms",
-   "rssMb": 130
+   "rssMb": 135
   },
   {
    "name": "history: save 1,000 versions (all kept)",
-   "value": 2396,
+   "value": 1857,
    "unit": "ms",
-   "rssMb": 101
+   "rssMb": 99
   },
   {
    "name": "history: save 1,000 versions (all kept)",
-   "value": 2.396,
+   "value": 1.857,
    "unit": "ms/save",
-   "rssMb": 101
+   "rssMb": 99
   },
   {
    "name": "history: list 1,000 versions",
-   "value": 0.3311,
+   "value": 0.2281,
    "unit": "ms",
-   "rssMb": 101
+   "rssMb": 99
   },
   {
    "name": "history: read one version of 1,000",
-   "value": 0.1055,
+   "value": 0.09021,
    "unit": "ms",
-   "rssMb": 101
+   "rssMb": 99
   },
   {
    "name": "history: restore a version (1,000 in the index)",
-   "value": 4.706,
+   "value": 3.884,
    "unit": "ms",
-   "rssMb": 101
+   "rssMb": 99
   },
   {
    "name": "history: one pruning pass over 1,000 versions",
-   "value": 0.3603,
+   "value": 0.3147,
    "unit": "ms",
-   "rssMb": 101
+   "rssMb": 99
   },
   {
    "name": "history: save 1,000 automatic versions (thinned as they age)",
-   "value": 1575,
+   "value": 1251,
    "unit": "ms",
-   "rssMb": 101
+   "rssMb": 99
   },
   {
    "name": "history: versions left after thinning",
    "value": 204,
    "unit": "versions",
-   "rssMb": 101
+   "rssMb": 99
   },
   {
    "name": "activity: 100,000 events, 10 readers, 100,000 entries kept",
-   "value": 120.2,
+   "value": 98.43,
    "unit": "ms",
-   "rssMb": 157
+   "rssMb": 140
   },
   {
    "name": "activity: 100,000 events, 10 readers, 100,000 entries kept",
-   "value": 831707,
+   "value": 1015958,
    "unit": "events/s",
-   "rssMb": 157
+   "rssMb": 140
   },
   {
    "name": "activity: 100,000 events, 10 readers, default keep (1,000)",
-   "value": 100.1,
+   "value": 87.11,
    "unit": "ms",
-   "rssMb": 157
+   "rssMb": 140
   },
   {
    "name": "activity: 100,000 events, 10 readers, default keep (1,000)",
-   "value": 998982,
+   "value": 1148011,
    "unit": "events/s",
-   "rssMb": 157
+   "rssMb": 140
   }
  ]
 }

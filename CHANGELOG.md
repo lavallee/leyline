@@ -1,5 +1,112 @@
 # Changelog
 
+## 0.7.0 (2026-11-24)
+
+The plumbing `docs/landscape.md` found missing: a conversation is now a log of events a
+browser can subscribe to and resume, the reply streams, an agent's question can wait for
+a person, a running turn can be steered, and the agent's memory survives a restart. The
+command table can also be offered as an MCP server. No export path or signature was
+removed; every new behaviour is opt-in except where listed below.
+
+Behaviour changes (what a host could notice without opting in to anything):
+
+- `./server/conversations`: **what is on disk changed.** Beside each `<name>.json` there
+  is now `<name>.events.jsonl`, and `<name>.json` is a snapshot that can be behind until
+  the log is next folded into it (every 1,000 events, on `reset()` and on `close()`). A
+  program that reads `<name>.json` itself while the host is running sees an older state:
+  use `readConversation(dir, key)`. Files written by earlier versions are read as they
+  are. An earlier version of this package pointed at the folder reads the snapshots
+  only; after a clean `close()` those hold everything.
+- `./server/conversations`: a change a host makes to a turn **without** `tools.save()`,
+  `store.save(key)` or `store.update()` used to reach the disk with the next write of
+  that conversation, whatever caused it. It now reaches the disk at the next compaction
+  or `close()`. Copycat's own calls (`tools.save()` in a run, `store.save(key)` after a
+  command) are unaffected.
+- `./server/conversations`: `store.save(key)` with nothing changed writes nothing. Before,
+  it rewrote the file.
+- `./server/conversations`: the snapshot carries `eventSeq`, and a conversation gains a
+  `memory` field once a turn on its main lane succeeds with a `threadId` or `sessionId`
+  in its `provenance`. `unload()` refuses a conversation that has subscribers.
+- `./server/providers/codex-app-server`: **requests from the agent are answered by
+  method.** Before, every request got `{ decision: 'decline' }`, which is the wrong
+  shape for all but two of them. Now `item/permissions/requestApproval` is declined as
+  `{ permissions: {}, scope: 'turn' }`, `item/tool/requestUserInput` as
+  `{ answers: {} }`, `mcpServer/elicitation/request` as `{ action: 'decline', … }`,
+  `execCommandApproval` and `applyPatchApproval` with a `ReviewDecision`, `item/tool/call`
+  with `{ contentItems, success: false }`, and a method the adapter does not know with a
+  JSON-RPC error (-32601). The two approvals a 0.6.0 host could meet are declined exactly
+  as before.
+- `./server/providers/codex-app-server`: `onApproval` no longer has a default of its
+  own. A host's `onApproval` still sees every request first and an object it returns is
+  still sent as given; when it returns nothing or throws, the request goes on to the
+  run's `onAsk` and then to a decline in the request's own shape (before: always
+  `{ decision: 'decline' }`).
+- `./server/providers/codex-app-server`: `capabilities.textStream` is `true`.
+  `turn/start` now names the approval policy on every turn (`'never'` unless the run
+  says otherwise, which is what the thread already had).
+- All adapters: `capabilities` gains `asks`, `steer` and `resume`. `provenance` gains
+  `memory` on `codex-app-server` and `acp`. A test that compares either object exactly
+  needs the new keys.
+- `./server/providers/acp`: a session id handed to `run()` after `reset(key)` forgot
+  that session is no longer loaded again; a new session starts. Before, the id was
+  loaded if the agent still had it.
+
+Added:
+
+- `./server/conversations`: the event log (options `coalesce`, `coalesceChars`,
+  `compactEvery`, `compactBytes`, `keepEvents`, `keepBytes`); `store.update(key, turnId,
+  fn)`; `store.snapshot`, `subscribe`, `position`, `subscribers`, `compact`;
+  `readConversation(dir, key)`, `logNameFor(key)`; `tools.text` and `turn.preview`;
+  asks (`tools.ask`, `store.answer`, options `onAsk` and `askTimeout`, `turn.asks`, error
+  code `answered`); steering (`store.steer`, option `steer`, `tools.steering`,
+  `turn.steers`); memory (`conversation.memory`, `tools.resume`, `store.forget`).
+- `./server/events`: `applyEvent`, `EVENT_TYPES`, `formatCursor`, `parseCursor`. No imports.
+- `./server/stream`: `streamConversation(store, key, req, res, options)`.
+- `./stream-client`: `followConversation(url, options)`.
+- `./server/providers` (contract): `createBatcher`, `chosenOption`, `ASK_OPTIONS`; request
+  option `onAsk`; `provider.steer`; error code `ended`.
+- `./server/providers/codex-app-server`: `onText`, `streamOutput`, `streamBatch`;
+  `onAsk`, `approvalPolicy`, `CODEX_REQUESTS`; `steer(key, input)`; `threadId` on a run
+  and `provenance.memory`.
+- `./server/providers/acp`: `onAsk` on a run; `provenance.memory`.
+- `./server/mcp`: `createMcpServer`, `serveMcp`, `serveMcpBridge`, `describeTools`.
+- `scripts/codex-real-check.mjs`, `scripts/mcp-real-check.mjs` (neither in `npm test`).
+- The soak covers compaction, half-written log lines and resumed subscriptions.
+
+Measured (`bench/RESULTS.md`, the 0.6.0 code against this, same session): one activity
+update written to a 200-turn conversation, 10.8 ms to 0.16 ms; a burst of 150 sends,
+198 ms to 17 ms; `save(key)` after changing one finished turn, 10.5 ms to 2.2 ms, and
+`update()` 0.11 ms. Opening a conversation is slower, 1.2× to 1.8× (about 10 ms against
+6 ms for 200 turns), and the store holds 3 to 10 per cent more memory.
+
+Run against real programs on 2026-11-24 (Codex CLI 0.171.0, signed in, model
+`gpt-6.2-sol` as the app-server's default):
+
+- `scripts/codex-real-check.mjs`, all four parts observed. (a) A four-sentence reply
+  arrived as 12 `turn.text` events over about a second and a half, all of them before
+  the turn finished, and they added up to the final message. (b) A steer sent after the
+  first of three `sleep 3` commands changed the final reply from DONE to PELICAN, was
+  recorded on the turn, and a steer after the turn ended was answered `ended`; with
+  `streamOutput` each command's output arrived as an `append` event. (c) With
+  `approvalPolicy: 'on-request'` and a write outside the writable roots, one
+  `item/commandExecution/requestApproval` became a pending ask, was answered `accept`
+  through `store.answer()`, and the file was written. Only the accept path and only
+  this kind of ask were exercised. (d) After closing the store and the provider (the
+  app-server process exited) and making both again, the next run resumed the same
+  thread (`provenance.memory: 'resumed'`) and recalled the word from the turn before.
+- That run also showed that Codex repeats the previous turn's usage report after
+  `thread/resume`; usage for the first turn after a resume is computed from it.
+- `scripts/mcp-real-check.mjs`: Codex's MCP client (it asked for protocol 2025-06-18)
+  completed the handshake with `./server/mcp`, listed both tools, called one and read a
+  failed call. Its `resources/list` was refused with -32601 and it carried on. No client
+  of the 2026-07-28 revision was available: that half is tested against the
+  specification as read, not against a client.
+
+Not checked against a real agent: every ask kind but a command approval; a decline or
+`cancel`; `thread/resume` of a thread Codex no longer has (the `'lost'` path); anything
+in the ACP adapter's new code (its tests use the fake agent); the stream helper in a
+real browser.
+
 ## 0.6.0 (2026-11-24)
 
 A hardening pass: an audit of every server module for what goes wrong under a crashing

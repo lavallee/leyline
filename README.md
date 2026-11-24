@@ -25,9 +25,13 @@ The package began as the chat panel only, and its name no longer fits. It stays
 | `./server/rpc` | `CodexRpc`: a JSON-RPC process transport over stdio. Unchanged. |
 | `./server/routines` | `createRoutineBank`: routine storage. Unchanged. |
 | `./server/providers` | One contract for agents, and three adapters. 0.3.0. |
-| `./server/providers/acp` | A fourth adapter: any agent that speaks the Agent Client Protocol. Unreleased. |
-| `./server/conversations` | The turn store: queue, lanes, persistence, recovery, stop. 0.3.0. |
+| `./server/providers/acp` | A fourth adapter: any agent that speaks the Agent Client Protocol. 0.6.0. |
+| `./server/conversations` | The turn store: queue, lanes, an event log per conversation, recovery, stop, subscribe, asks, steering. 0.3.0; the log and what follows from it, 0.7.0. |
+| `./server/events` | The events of a conversation and the one function that applies them, for a server and a browser alike. 0.7.0. |
+| `./server/stream` | A conversation as Server-Sent Events that a browser can follow and pick up again. 0.7.0. |
+| `./stream-client` | The browser side of that: plain JavaScript on `fetch`, reconnecting and resuming. No React. 0.7.0. |
 | `./server/commands` | How an agent with a shell reaches the host: a private key over loopback. 0.3.0. |
+| `./server/mcp` | The same operations as a Model Context Protocol server over stdio, for agents that speak MCP. 0.7.0. |
 | `./server/telemetry` | An optional hook, and an OTLP reporter that is off unless configured. 0.3.0. |
 | `./server/routine-set` | Shipped and banked routines as one set: kinds, slash names, a routine as a request, save, remove. 0.4.0. |
 | `./server/history` | Versions of a document: save, list, restore, prune, and a checkpoint per request. 0.4.0. |
@@ -144,8 +148,9 @@ What it does for every host:
 
 - The sandbox is read-only unless the host passes `sandbox.mode: 'workspace-write'` and
   names the writable folders.
-- Approval requests are declined unless the host passes `onApproval`. The sandbox is the
-  boundary.
+- A request the agent makes of the client (an approval, a question) is declined unless
+  the run passes `onAsk`; see [Asks](#asks-requests-that-wait-for-a-person). The sandbox
+  is the boundary. Approvals are only asked for at all when a run sets `approvalPolicy`.
 - Raw reasoning is never read or passed on, only the summaries the agent publishes.
 - `disableUserExtensions` (on by default) switches off the MCP servers, plugins and apps
   in the user's own Codex configuration for these threads. Pass `false` to leave them on.
@@ -161,7 +166,8 @@ What it does for every host:
   the reply.
 - A run past its `timeout` is interrupted and its thread dropped, so the next run on that
   key starts fresh. `idleTimeout` on a run does the same when the agent has said nothing
-  about it for that long.
+  about it for that long; the quiet period is not counted while the agent is waiting for
+  an answer to an ask.
 - A stop is bounded. If the agent has not confirmed an interrupt within `stopGrace`
   (10 seconds by default) the run ends as `stopped` anyway and its thread is forgotten,
   since nobody knows what state it is in.
@@ -172,6 +178,87 @@ What it does for every host:
   thrown. The child's stderr is always drained.
 - `close()` sends SIGTERM, then SIGKILL after `killGrace` (2 seconds). With
   `processGroup: true` both go to the child's whole process group.
+
+#### Streaming
+
+The reply arrives as it is written, and so can a command's output:
+
+```js
+await agent.run({
+  key: 'page-42:main', input: 'Summarise the draft.',
+  onText: (piece, { segment }) => preview(piece, segment),   // segment changes when the agent begins another message
+  streamOutput: true,                                         // a command's output as `append` events on its activity item
+  onEvent: event => foldActivity(activities, event),
+});
+```
+
+Deltas are gathered for 40 ms or 400 characters before they are passed on
+(`streamBatch: { ms, chars }` on the provider; `ms: 0` passes each one straight through),
+and always reach the host before any event that followed them. Messages the agent marks
+as commentary arrive through `onEvent` as an "Agent note" that grows, not through
+`onText`. Without `streamOutput` a command's activity item is what it was before: the
+tail of the output when the command ends. `capabilities.textStream` is `true`.
+
+#### Asks: requests that wait for a person
+
+When a run sets an approval policy that asks, Codex sends requests to its client before
+it acts. The run's `onAsk` receives each one in a shape that is the same for every
+provider, and may take as long as a person does to answer:
+
+```js
+await agent.run({
+  key: 'page-42:main', input: 'Publish the page.',
+  approvalPolicy: 'on-request',                 // default 'never': nothing is asked, what the sandbox forbids fails
+  sandbox: { mode: 'workspace-write', cwd: '/srv/site', writableRoots: ['/srv/site/work'] },
+  onAsk: async (ask, { signal }) => {
+    // ask: { id, kind: 'command', title: 'Run a command', detail: { command, cwd, reason },
+    //        options: [{ id: 'accept' }, { id: 'acceptForSession' }, { id: 'decline' }, { id: 'cancel' }] }
+    return await showToThePerson(ask, signal);  // 'accept', or { option: 'accept', answers }, …
+  },
+});
+```
+
+Kinds: `command` and `file-change` (approvals), `permissions` (more access for the turn
+or the session), `input` (questions from the agent, with `questions`; answer with
+`{ option: 'accept', answers: { questionId: text } }`) and `elicitation` (a question from
+an MCP server; answer with `{ option: 'accept', content }`). The reply sent to Codex has
+the shape its method expects; the table is exported as `CODEX_REQUESTS` and was checked
+against the bindings `codex app-server generate-ts` writes for 0.171.0. A throw, no
+answer, or an unknown option is a decline. Stopping the run answers what is still open
+with `cancel`; a request Codex withdraws aborts `signal` and is not replied to. A method
+this client does not know gets a JSON-RPC error instead of an approval-shaped reply.
+With a conversation store, pass `onAsk: tools.ask` and the store does the waiting (see
+[Conversations](#conversations)).
+
+#### Steering
+
+```js
+const running = agent.run({ key: 'page-42:main', input: 'Work through the open comments.' });
+await agent.steer('page-42:main', 'The owner just rewrote section 2: read it again before you go on.');
+```
+
+`steer` calls Codex's `turn/steer` with the id of the turn that is running
+(`expectedTurnId`), so input that arrives as a turn ends is refused by the agent rather
+than starting a turn nobody asked for. That refusal, and there being no run for the key,
+rejects with a `ProviderError` whose `code` is `'ended'` (status 409): send the text as a
+new request instead. A steer sent while the run is still starting waits for the turn.
+`capabilities.steer` says whether an adapter can; only this one can.
+
+#### Memory across a restart
+
+Each result's `provenance.threadId` names the agent's thread. Hand it back after a
+restart and the thread is taken up again with `thread/resume`:
+
+```js
+const next = await agent.run({ key: 'page-42:main', input: 'Carry on.', threadId: saved });
+next.provenance.memory;   // 'kept' | 'resumed' | 'new' | 'lost'
+```
+
+`'kept'`: the provider already held the thread. `'resumed'`: taken up again from the id.
+`'new'`: a first thread. `'lost'`: the id was given but Codex could not resume it, so a
+new thread was started and the agent remembers nothing. A thread the provider was told
+to forget (`reset(key)`, a run that timed out or would not stop) is never resumed. With
+a conversation store, spread `tools.resume` into the run and the store keeps the id.
 
 ### cli-oneshot
 
@@ -369,6 +456,15 @@ Also:
   directly and never call `fs/*`. A host that needs a hard boundary runs the command
   inside one.
 
+**Asks, memory, steering.** `onAsk` on a run receives a permission request in the same
+shape the Codex adapter uses (kind `permission`, with the agent's own options), after
+`onPermission` if that hook leaves it undecided: `'accept'` picks the first allow-once
+option and is never widened to "always". `provenance.memory` says `'kept'`, `'resumed'`
+(loaded or resumed from a saved id), `'new'` or `'lost'`, beside the older
+`provenance.session`. There is no `steer()`: version 1 of the protocol gives a client
+nothing to send into a running prompt turn except `session/cancel`, so
+`capabilities.steer` is `false`.
+
 #### The live draft, and a write that becomes a proposal
 
 `fs/read_text_file` exists so an agent reads what is in the editor, not what is on disk,
@@ -479,11 +575,37 @@ await store.reset('page-42');             // archives the old turns first
   an agent keyed by it keeps its memory. A request that starts while the main lane is
   busy gets a side lane with a fresh id: a fresh agent. `maxLanes` caps how many run at
   once per conversation; the rest wait in order. `maxLanes: 1` is a strict queue.
-- **Storage.** One JSON file per conversation, mode 0600, in a 0700 folder. Each write
-  goes to a temporary file of its own that is renamed into place. A key that is not
-  plainly safe as a file name is stored under a hash of it. Each conversation has its
-  own write queue, and writes that pile up behind one in progress are merged into one.
-  `fsync: true` flushes each file before the rename (see Guarantees and limits).
+- **Storage.** Two files per conversation, mode 0600, in a 0700 folder: a snapshot,
+  `<name>.json` (`{ key, turns, …, eventSeq }`), and an event log, `<name>.events.jsonl`
+  (a header line, then one JSON line per event since the snapshot). An update appends
+  lines to the log; it does not rewrite the conversation. Now and then (`compactEvery`
+  events, 1,000 by default, or `compactBytes`), and on `close()`, the log is folded into
+  a new snapshot, written to a temporary file and renamed into place. A reader takes the
+  snapshot and replays the events numbered after it: `readConversation(dir, key)` does
+  that for a tool that looks at the folder without a store. A `<name>.json` written by
+  an earlier version is read as it is and gets a log when it next changes. A key that is
+  not plainly safe as a file name is stored under a hash of it. Each conversation has
+  its own write queue, and writes that pile up behind one in progress are merged into
+  one. `fsync: true` flushes each write (see Guarantees and limits).
+- **Changing a turn yourself.** The store finds out what changed by comparing each turn
+  with what it last recorded, so a host may alter a turn directly. Inside a run, call
+  `tools.save()` afterwards. Outside one, the supported way is
+  `await store.update(key, turnId, turn => { turn.proposals[1].fate = 'undone'; })`,
+  which compares that one turn and resolves when the change is on disk. `store.save(key)`
+  still works for a host that changed turns in place: it compares every turn of the
+  conversation, so it costs more (about 2 ms against 0.2 ms for 200 turns, in
+  `bench/RESULTS.md`). A change nobody announced is not lost, but it is only recorded at
+  the next compaction or `close()`.
+- **Events.** Every change is an event with a sequence number: `turn.created`,
+  `turn.status`, `turn.activity`, `turn.text`, `turn.ask`, `turn.steer`,
+  `turn.proposals`, `turn.finished`, `turn.patch`, `conversation.patch`, `reset`. They
+  all carry the same few fields (`set`, `unset`, `append`, `activities`) and one function,
+  `applyEvent` from `./server/events`, applies any of them to a copy. Activity and reply
+  text that arrive in a burst are gathered into one event every `coalesce` milliseconds
+  (50 by default), sooner once `coalesceChars` (4,000) have arrived.
+- **The reply as it arrives.** `tools.text(piece, { segment })` keeps `turn.preview` while
+  the turn runs; it is removed when the turn finishes and `message` holds the reply. Pass
+  it to a provider as `onText`.
 - **A file that cannot be used is never written over.** One that does not parse, is not
   a conversation, or holds another key is renamed to `<name>.corrupt-<time>` (or
   `.foreign-<time>`) and reported through `onError` with `code: 'corrupt'` and the new
@@ -492,7 +614,11 @@ await store.reset('page-42');             // archives the old turns first
   is tried again on the next call.
 - **Recovery.** A turn left `running` or `queued` by a process that died is marked
   `failed` when the conversation is next opened, with a message asking the person to
-  send it again.
+  send it again; an ask it left waiting is marked `cancelled`. A last log line the dying
+  process did not finish is left out and cut off. A log that is damaged in the middle, or
+  belongs to another conversation or to a snapshot that is gone, is moved aside
+  (`.corrupt-<time>`, `.foreign-<time>`) and reported; what could be replayed before the
+  damage is kept.
 - **Stop.** A waiting request is removed, including one still being written by `send`. A
   running one has its `signal` aborted and is recorded as `stopped` even if `run`
   ignores the signal; that record waits for `run` to return unless `stopGrace` is set,
@@ -502,8 +628,9 @@ await store.reset('page-42');             // archives the old turns first
   does not run a request a second time.
 - `reset` copies the old turns to `archive/` and refuses while anything is running,
   waiting or on its way in. A send that arrives during a reset joins the new conversation.
-- `close()` stops everything, writes it, and after that the store takes no more requests
-  (`send` is refused with `code: 'closed'`) and writes nothing.
+- `close()` stops everything, writes it, folds each log into its snapshot (so the
+  `.json` files alone hold everything while the host is down), and after that the store
+  takes no more requests (`send` is refused with `code: 'closed'`) and writes nothing.
 - **Memory.** A conversation stays in memory once opened. `unload(key)` drops an idle one
   and `evictAfter` does so by itself after a quiet period. Leave `evictAfter` unset if the
   host keeps conversation objects: after an eviction `open()` returns a new one.
@@ -511,6 +638,130 @@ await store.reset('page-42');             // archives the old turns first
   uses it to find which turn an agent's command belongs to.
 - All wording can be replaced through `messages`. `stopped`, `removed` and `interrupted`
   may each be a function of the turn, for a host with more than one kind of request.
+
+### Subscribing
+
+```js
+const { cursor, conversation } = await store.snapshot('page-42');    // a copy, and the position it corresponds to
+const stop = store.subscribe('page-42', { after: cursor }, (event, at) => {
+  if (event.type === 'gap') return reload();     // the position is no longer held: take snapshot() again
+  if (event.type === 'closed') return;           // the store closed, or dropped the conversation from memory
+  applyEvent(conversation, event);               // at.cursor is the position after this event
+});
+await stop.ready;                                // everything after `cursor` has been delivered; live from here
+stop();
+```
+
+A position is `"<epoch>:<seq>"`. The epoch names one loading of the conversation by one
+process: sequence numbers handed out before a restart may never have reached the disk,
+so a cursor from before one is answered with a `gap`, as is one older than the store
+keeps in memory (`keepEvents`, 2,000 events, or `keepBytes`, 4 MB, per conversation).
+Listeners are called synchronously, in order; one that throws is reported through
+`onError` and the others still hear. `{ raw: true }` delivers each event as its JSON text.
+
+### Asks
+
+A provider's question for a person, held on the turn until someone answers it:
+
+```js
+const store = createConversationStore({
+  dir, onAsk: (ask, turn) => ask.kind === 'command' && isHarmless(ask.detail.command) ? 'accept' : undefined,
+  async run(turn, lane, signal, tools) {
+    return agent.run({ key: lane.id, input: tools.payload.prompt, approvalPolicy: 'on-request', onAsk: tools.ask, onEvent: tools.activity, signal });
+  },
+});
+// The browser sees turn.asks: [{ id, kind, title, detail, options, status: 'pending', askedAt }] and the person chooses:
+await store.answer('page-42', turnId, askId, 'accept');
+```
+
+The store's `onAsk` is the policy: it may answer at once by returning an answer, or
+return nothing to leave the ask `pending` for `store.answer()`. **Its default answers
+`'decline'` at once**, so a host that does nothing about asks never has a turn waiting
+on one. A pending ask that nobody answers within `askTimeout` (5 minutes; a provider
+may give one ask less) is declined and marked `expired`; one still open when the turn
+stops or ends is marked `cancelled`. `answer()` rejects with `code: 'answered'` (409)
+for an ask that is no longer waiting. The option chosen is kept on the ask
+(`ask.answer`); anything a person typed in reply is passed to the agent and never stored.
+
+### Steering
+
+```js
+const store = createConversationStore({ dir, run, steer: (input, turn, lane) => agent.steer(lane.id, input) });
+const { steered, reason } = await store.steer('page-42', turnId, 'Use the second draft instead.');
+if (!steered && reason === 'ended') await store.send('page-42', { user: 'Use the second draft instead.', payload });
+```
+
+A steer the agent took is recorded on the turn (`turn.steers: [{ id, text, at }]`, a
+`turn.steer` event). `reason` is `'ended'` when the turn has finished, even a moment ago
+(the provider's own check makes that safe: see [Steering](#steering) under
+codex-app-server); `'waiting'` when it has not started; `'unsupported'` when nothing
+says how to steer the run. A run may say so itself with `tools.steering(fn)` instead of
+the store's `steer` option.
+
+### The agent's memory across a restart
+
+Each successful turn on the main lane leaves the id of the agent's thread or session
+with the conversation (`conversation.memory.main`, taken from `provenance`), and the
+next run is handed it as `tools.resume`:
+
+```js
+async run(turn, lane, signal, tools) {
+  const result = await agent.run({ key: lane.id, input: tools.payload.prompt, ...tools.resume, signal });
+  return { message: result.message, provenance: result.provenance };   // provenance.memory: 'kept' | 'resumed' | 'new' | 'lost'
+}
+```
+
+`tools.resume` is `{ threadId }` for a Codex thread, `{ sessionId }` for an ACP session,
+and `{}` when there is none or the lane is a side lane. `reset()` forgets it, as does
+`store.forget(key)`; the provider's own `reset(key)` is the host's to call. A turn that
+was running when the process died is still marked failed: what survives is what the
+agent remembers of the turns before it.
+
+## Streaming a conversation to a browser
+
+Instead of polling, a browser follows the conversation as Server-Sent Events and picks
+it up again after a dropped connection or a reload. Server:
+
+```js
+import { streamConversation } from '@lyra-forge/leyline/server/stream';
+
+http.createServer(async (req, res) => {
+  if (req.method === 'GET' && url.pathname === '/chat/stream') {
+    if (!mayRead(req)) return refuse(res);                     // who may read is the host's to decide, before this
+    return void streamConversation(store, keyFor(req), req, res);
+  }
+});
+```
+
+Browser:
+
+```js
+import { followConversation } from '@lyra-forge/leyline/stream-client';
+
+const feed = followConversation('/chat/stream?page=42', {
+  onChange: (conversation, event) => render(conversation),     // the copy, after every change
+  onGap: reason => {},                                         // the copy was replaced: 'gap', 'lag' or 'mismatch'
+});
+feed.state; feed.cursor; feed.close();
+```
+
+What goes over the wire: first a `snapshot` event with the whole conversation, then one
+event per change, each with `id: <cursor>`. A client that reconnects sends the last id it
+applied in `Last-Event-ID` and receives exactly the events after it; when that position
+is no longer held it receives a fresh snapshot instead (`reason: 'gap'`). A comment line
+is sent every `heartbeat` (15 seconds) of silence. A client that falls more than
+`maxBuffered` bytes behind (1 MB) stops being queued for, and gets a snapshot when it
+has caught up (`reason: 'lag'`): memory held for one client is bounded by that and by
+the size of one snapshot. When the client goes away the subscription and the timer go
+with it. `shape` trims what a snapshot shows a browser; events are sent as recorded, so
+keep what a browser must not see off the turn (that is what `payload` is for).
+
+The client is plain JavaScript on `fetch` with a readable body (every current browser,
+and Node 22), with no dependency and no React. It applies events with the same reducer
+the server uses, reconnects after `minDelay` (500 ms), doubling to `maxDelay` (15 s)
+with some spread, and treats `silence` (45 s) without a byte as a dead connection. The
+native `EventSource` works against the same endpoint too, since it sends
+`Last-Event-ID` itself; it only lacks the backoff and the reducer.
 
 ## Commands
 
@@ -567,6 +818,44 @@ request and cannot read the file) and other machines. It does not protect agains
 programs run by the same user, which can read the session file just as the agent's
 command does. `verifyRequest`, `issueKey` and `sameSecret` are exported for hosts that
 keep their own route.
+
+### As an MCP server
+
+An agent that speaks the Model Context Protocol can be given the same operations as
+tools, without the CLI. MCP servers on stdio are child processes of the agent, so the
+host ships a script of a few lines that the agent starts, and the script passes each
+call on to the host over loopback with the session key, as the CLI does:
+
+```js
+#!/usr/bin/env node
+import { serveMcpBridge } from '@lyra-forge/leyline/server/mcp';
+
+const served = serveMcpBridge({
+  app: 'myhost', name: `agent-${process.env.MYHOST_PORT}`,
+  defaults: { page: process.env.MYHOST_PAGE },               // added to every call's data
+  tools: [
+    { name: 'show', description: 'The draft as it is now.', inputSchema: { type: 'object', properties: {} } },
+    { name: 'edit', description: 'Replace text in the draft.', inputSchema: { type: 'object', required: ['edits'], properties: { edits: { type: 'array' } } } },
+  ],
+});
+served.done.then(() => process.exit(0));
+```
+
+Name that script as an MCP server where the agent takes them: for Codex,
+`threadConfig: { mcp_servers: { myhost: { command: process.execPath, args: [script], env: { MYHOST_PORT, MYHOST_PAGE } } } }`;
+for an ACP agent, `mcpServers` on the provider or the run. A process that holds the
+operations itself uses `serveMcp({ tools, call })` instead of the bridge.
+
+What a tool returns is the result (text as it is, anything else as JSON, an object also
+as `structuredContent`); what it throws, or what the host refuses, comes back as a
+failed call with the message as its text (`isError`), which the agent can read. The
+server speaks the handshake of MCP 2025-11-25 and earlier (`initialize`, `ping`,
+`tools/list`, `tools/call`) and the 2026-07-28 revision (`server/discover`, the protocol
+version named on each request). It was run under a real client once, the Codex CLI's
+(`scripts/mcp-real-check.mjs`; that client speaks 2025-06-18); the 2026-07-28 shapes
+follow the specification as read and are covered by this package's tests only. There
+are no resources, prompts, sampling or HTTP transport, and the checks on the loopback
+endpoint are unchanged: the bridge is one more program holding the same key.
 
 ## Routines
 
@@ -925,23 +1214,35 @@ What the server modules promise, and what they do not. The tests named are in `t
 
 **Durability.**
 
-- A write replaces a file whole (temporary file, then rename), so a reader, or a process
+- A file that is written whole (a conversation's snapshot, a history index, a threads
+  file) goes to a temporary file and is renamed into place, so a reader, or a process
   that starts after a crash, sees the old file or the new one and never part of either.
-  `npm run soak` kills a process that is using the conversation store, over and over,
-  and checks exactly this.
+- A conversation's log is appended to. A process that dies in the middle of an append
+  leaves at worst one unfinished last line, which every reader leaves out and the next
+  store to open the conversation cuts off; whole lines before it are kept. A snapshot is
+  written before the log it replaces is started again, and a reader skips events the
+  snapshot already holds, so a crash between the two loses nothing and repeats nothing.
+  `npm run soak` kills a process that is using the store over and over, in appends and
+  in compactions, leaves half-written lines on logs, and checks that every conversation
+  reads back whole with everything the store had reported written.
 - If the process dies, what is lost is what had not been written yet: activity from the
   last `saveDelay` (600 ms by default) and, for turns that were running or waiting, the
   work itself; those turns are marked failed on the next open. A turn's final status is
   written before `onCall` is called, and `send()` resolves only once the request is on disk.
 - If the machine loses power, a file renamed a moment earlier can come back empty or
-  old, because nothing is flushed by default. `fsync: true` (conversation store, history,
-  threads) flushes the file before the rename and the folder after it. It is slower, and
-  off unless asked for. The work log and trail append one line per write and never flush.
+  old, and lines appended a moment earlier can be missing, because nothing is flushed by
+  default. `fsync: true` (conversation store, history, threads) flushes a whole file
+  before the rename and the folder after it, and a log after each append. It is slower,
+  and off unless asked for. The work log and trail append one line per write and never flush.
 - A file that will not parse is moved aside and reported, never overwritten or deleted
-  (conversations, history indexes, thread files). Routine and profile files that will not
+  (conversation snapshots and logs, history indexes, thread files). Routine and profile files that will not
   parse are left where they are and left out of the list.
+- **An older version reading a newer folder** sees each conversation as of its last
+  snapshot: 0.6.0 and earlier do not read the log. After a clean `close()` the snapshots
+  hold everything, so going back a version then loses nothing; after a crash it would
+  lose what is only in the logs.
 - **One process per folder.** Nothing is locked. Two processes writing the same
-  conversation folder overwrite each other's changes, whole file at a time. History is
+  conversation folder interleave their logs and overwrite each other's snapshots. History is
   the exception only in that it notices what another process wrote.
 
 **Ordering.**
@@ -951,6 +1252,16 @@ What the server modules promise, and what they do not. The tests named are in `t
   they finish.
 - The main lane holds one turn at a time. A conversation is busy from the moment a
   request is accepted until its turn has its final status.
+- A conversation's events are numbered from 1 with no gaps, in the order the changes
+  were recorded, and a subscriber receives them in that order, each once. A position is
+  good only within the epoch it came from (one loading of the conversation by one
+  process): after a restart, or when the position is older than the store keeps, the
+  subscriber is told there is a gap and takes a snapshot, never a silent hole. A copy
+  made from a snapshot and the events after it equals the store's state at that
+  position; `test/stream.test.mjs` checks this under random disconnects, slow readers
+  and server restarts, and the soak checks it across resumed subscriptions.
+- What subscribers are told can run ahead of the disk by up to `saveDelay` for activity
+  and reply text. Status changes, asks, steers and results are written as they happen.
 - Activity events are folded in the order the provider delivers them. An activity feed
   gives each reader events in the order they happened, each once, as long as the reader
   asks before `keep` newer ones have arrived.
@@ -960,7 +1271,10 @@ characters each), turns per conversation (200), events per document in an activi
 (1,000), messages per thread (500), one line from an agent process (64 MB), a one-shot
 agent's output (4 MB), a model's reply over HTTP (16 million characters), remembered
 HTTP conversations (1,000 keys of 40 messages), a command request's body (2 MB), a work
-log or trail (two files of 8 MB). Not bounded unless the host does something: the
+log or trail (two files of 8 MB), the recent events a store keeps per conversation for
+subscribers (2,000 events or 4 MB), what waits unsent for one stream client (1 MB, or
+one snapshot if that is larger), a turn's `preview` (200,000 characters), one line sent
+to the MCP server (8 MB). Not bounded unless the host does something: the
 conversations a store has open (`unload`, `evictAfter`), the documents and readers an
 activity feed knows (`drop`, `forget`), a turn's `message` and the host's own fields, the
 `archive/` folders that resets and removed routines fill, and files moved aside as corrupt.
@@ -969,10 +1283,11 @@ activity feed knows (`drop`, `forget`), a turn's `message` and the host's own fi
 
 | | Overall | Quiet period | Stop |
 | --- | --- | --- | --- |
-| codex-app-server | `timeout`, 15 minutes | `idleTimeout`, off | interrupt, then `stopGrace` (10 s) and the run ends regardless |
+| codex-app-server | `timeout`, 15 minutes | `idleTimeout`, off; paused while an ask waits | interrupt, then `stopGrace` (10 s) and the run ends regardless; open asks are answered `cancel` |
 | cli-oneshot | `timeout`, 5 minutes | none | SIGTERM, then SIGKILL after 2 s |
 | http-chat | `timeout`, 5 minutes | `idleTimeout`, off | the request is aborted at once |
-| conversation store | none of its own | none | the signal is aborted; `stopGrace` (off) frees the lane if `run` never returns |
+| acp | `timeout`, 15 minutes | `idleTimeout`, off; paused while a hook or an ask is answered | `session/cancel`, then `cancelGrace` (10 s) |
+| conversation store | none of its own | none; an ask waits `askTimeout` (5 minutes), then is declined | the signal is aborted and open asks are cancelled; `stopGrace` (off) frees the lane if `run` never returns |
 
 When the host process exits normally its agent children are sent SIGTERM. A host that is
 itself killed runs no code: its children then see only their stdin close.
@@ -983,13 +1298,26 @@ edit's search takes time proportional to the document plus the text sought, what
 either contains. Keys and names a host or a model supplies never become paths: they are
 used as file names only when plainly safe, and hashed otherwise.
 
+**Asks and steering.** An ask is answered exactly once: by the store's policy, by
+`answer()`, by its time limit, or by the end of the turn, whichever comes first; later
+answers are refused. The default policy declines. A steer is addressed to the turn that
+was running when it was sent; one that arrives as the turn ends is refused by the agent
+and reported as `ended`, and a steer is recorded on the turn only after the agent took
+it. Neither is promised to survive a restart: a turn that was running is failed on the
+next open and its open asks cancelled.
+
 **Errors.** Each module raises its own error type with a stable `code` and a message fit
 to show: `ProviderError`, `RpcError`, `ConversationError`, `ProposalError`,
 `RoutineError`, `ThreadError`, `ProfileError`. Callbacks a host supplies (`onEvent`,
-`onText`, `onError`, `onCall`, `onApproval`, `onStderr`) may throw without breaking
-anything. No module calls `process.exit`.
+`onText`, `onAsk`, `onError`, `onCall`, `onApproval`, `onStderr`, subscribe listeners,
+the stream client's `onChange` and the rest) may throw without breaking anything. No
+module calls `process.exit`.
 
-**Not promised.** Exactly-once delivery to an agent (a request interrupted by a crash is
+**Not promised.** That a turn interrupted by a restart continues: the agent's memory of
+earlier turns can be resumed, the interrupted turn itself cannot. That the agent's own
+record of a thread or session still exists when it is asked for (`provenance.memory`
+then says `'lost'`). That a browser sees every intermediate state: bursts are gathered
+into fewer events, and a client that lags or reconnects late gets a snapshot. Exactly-once delivery to an agent (a request interrupted by a crash is
 marked failed and can be sent again; with a `requestId` it is not run twice by a retry of
 the same send). That a child's own children are stopped, unless `processGroup` is set.
 Protection from other programs run by the same user. Anything at all about two hosts
@@ -1002,10 +1330,16 @@ npm test         # node --test; no network, no model calls, no dependencies to i
 npm run check    # node --check over every .mjs file
 npm run bench    # a table of times and peak memory; bench/RESULTS.md has the last one
 npm run soak     # the conversation store, killed and reopened for 30 s (SOAK_SECONDS)
+
+node scripts/codex-real-check.mjs   # the store and the Codex adapter against the signed-in CLI: small model calls
+node scripts/mcp-real-check.mjs     # ./server/mcp under the Codex CLI's MCP client: no model call
+node scripts/acp-real-agent.mjs     # one small session per installed ACP agent
 ```
 
-Tests drive the adapters with stand-ins: a fake app-server (`test/fixtures/`), fake CLIs
-written to a temporary folder, and local HTTP servers. The TSX components are not
+Tests drive the adapters with stand-ins: a fake app-server and a fake ACP agent
+(`test/fixtures/`), fake CLIs written to a temporary folder, and local HTTP servers. The
+three scripts under `scripts/` are not part of `npm test`; what each observed when it was
+last run is in the changelog. The TSX components are not
 compiled or tested here; consumers build them.
 
 ## Not done yet
@@ -1019,11 +1353,24 @@ compiled or tested here; consumers build them.
   what that found. Skein and Toucan still run their own code. History, activity, threads,
   profiles and the work log have no host: they are tested alone and together
   (`test/together.test.mjs`) and will find gaps on first use.
-- **Run against a real agent once.** The Codex adapter was checked against the protocol
-  types `codex app-server generate-ts` produces (Codex CLI 0.171.0) and a fake server,
-  and then, through Copycat, against the signed-in Codex CLI for one short request (a
-  turn with activity and one edit). The one-shot presets, `http-chat` and the Somm
-  settings have not been run against real agents or endpoints.
+- **Run against real agents a few times, not for long.** The Codex adapter was checked
+  against the protocol types `codex app-server generate-ts` produces (Codex CLI 0.171.0)
+  and a fake server; through Copycat, against the signed-in CLI for one short request;
+  and with `scripts/codex-real-check.mjs` on 2026-11-24 for streaming, one steer, one
+  approval and one resume after a restart (the changelog has what was seen). Of the ask
+  kinds only a command approval has been seen from a real agent: file-change approvals,
+  permission requests, user-input questions and MCP elicitations are answered in the
+  shapes the bindings give and tested against the fake only. The one-shot presets,
+  `http-chat` and the Somm settings have not been run against real agents or endpoints.
+- **No host uses the 0.7.0 additions yet.** Copycat still polls and Toucan still runs
+  its own transport; `docs/adopting.md` says how each would move. The stream helper and
+  client have been driven by tests and a fuzz, not by a browser.
+- **An interrupted turn cannot be continued.** After a restart the agent's memory of the
+  earlier turns is resumed, but the turn that was running is marked failed and must be
+  sent again.
+- **The event stream is Leyline's own.** It is not AG-UI or the AI SDK's stream format;
+  a mapper from `./server/events` to either was left until a host asks.
+- **The MCP server is tools only**, over stdio, with the whole list as one page.
 - **Server-only consumers still install the UI's dependencies.** The package has one
   dependency list, and React is a required peer. The server modules import none of it.
 - **The ACP adapter has met real agents once, briefly.** One one-word session each with
@@ -1034,17 +1381,18 @@ compiled or tested here; consumers build them.
   draft sync stays in Copycat.
 - **Reflexes, presence, the brief, the review log, plans and references are not here.**
   `docs/patterns.md` says which are host-side by nature and which are candidates.
-- **The activity feed cannot reach a running turn** through this package: there is no
-  steering, so an agent hears what changed at its next command or turn.
+- **Nothing connects the activity feed to steering.** `store.steer()` can now reach a
+  running turn, but deciding when what people did meanwhile is worth interrupting an
+  agent for, and saying so, is still the host's (Toucan does it; see `docs/adopting.md`).
 - **History is synchronous** (file reads, writes and compression on the calling thread),
   as in Toucan. Large documents saved often will be felt.
-- **The conversation store rewrites a conversation whole.** Writes are batched
-  (`saveDelay`) and merged, but each still costs time in proportion to the conversation:
-  about 10 ms for 200 turns of ordinary size (`bench/RESULTS.md`). An append-only log
-  would remove that and is not built.
+- **Opening a conversation and `store.save(key)` still read all of it.** An update no
+  longer rewrites the conversation, but opening one parses the snapshot and replays the
+  log, and `save(key)` compares every turn (`bench/RESULTS.md`). There is no paging of
+  old turns, to disk or to a browser, and a full conversation (`maxTurns`) is still a
+  hard stop.
 - **`http-chat` has no tools**, so it cannot take the place of an agent that edits
   through commands.
-- Approvals can only be answered by a callback, not shown to a person.
 - **No TypeScript types** for the server modules; they are documented with JSDoc.
 - Tested on Node 24, 25 and 26. Node 22 is the stated minimum and was not available to test on.
 

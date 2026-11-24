@@ -246,6 +246,13 @@ capped output and activity sizes.
 
 ## Ranked changes
 
+**Status on 2026-11-24 (0.7.0).** Items 1, 8, 9, 11 and 12 were built in 0.6.0. Items 2
+to 7 and 10 were built in 0.7.0: asks (2), steering (3), the event log (4), subscribe
+and Server-Sent Events (5), memory across a restart (6, without "continue" for the turn
+that was interrupted), streaming (7, without opting out of unused notifications) and
+the MCP face (10). The changelog says what each was checked against. The rest of this
+document is as written against 0.5.0 and has not been revised.
+
 Ordered by harm avoided first, then by what unblocks a host, then by reach. Sizes are
 rough: small is under a day, medium a few days, large a week or more.
 

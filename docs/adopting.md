@@ -224,8 +224,125 @@ In the order that risks least:
 4. **Activity.** `createActivity` → `createActivityFeed({ snapshot: rowsOf, diff, busy })`, where `diff` is the loop in `settle` that calls `rowChanges` (with the "carried by its frame" rule). `ran(canvas, actor, changes)` → `feed.claim(canvas, actor, ids)`; actor kind `canvas` → `system`; event type `shape` → `change`. `describe` becomes a `change` wording function for `describeEvents`.
 5. **Profiles.** `server/profiles.mjs` → `createProfiles({ dir: join(data, '_profiles'), sources: plugins.map(commandSource) })`. Plugin discovery (`server/plugins.mjs`) stays. `profileInstructions` here has no Toucan-specific sentence about its CLI; add it in Toucan.
 6. **Work log and trail.** `createWorkLog({ file: join(data, '_work/log.jsonl') })`, `suggestRoutines(entries, { routines, covers })` with `COVERED`, `DOES` and `touches` moved into Toucan's `covers`. Entry field `canvas` is `doc` here: old log lines need reading with that in mind. `createTrail({ dir: data })` writes `<canvas>.trail.jsonl` where Toucan writes `<canvas>.log.jsonl`.
-7. **The agent and the chat.** `server/codex.mjs` → `CodexAppServerProvider` and `createConversationStore`. This is the hard one. Toucan shows approvals to the person, steers a running turn with activity, and streams events over a websocket; the adapter answers approvals by callback only and cannot steer. Either the adapter grows those two things first, or Toucan keeps `server/codex.mjs`.
+7. **The agent and the chat.** `server/codex.mjs` → `CodexAppServerProvider` and `createConversationStore`. This was the hard one: Toucan shows approvals to the person, steers a running turn with activity, and streams events over a websocket, and until 0.7.0 the adapter answered approvals by callback only and could not steer. It can now do all three; section 6 below maps Toucan's code onto it and says what is still missing.
 8. **The UI.** Bring `main`'s changes to the chat panel since 0.12.2 into `src/`, then have `app/Chat.tsx` import the package. The two panels were not compared feature by feature.
 
 Reflexes, the brief, presence, plans, references and the review log stay in Toucan
 (`docs/patterns.md`).
+
+## 5. Copycat on 0.7.0: the stream, asks, steering, memory
+
+None of this is done in Copycat; Copycat `main` runs unchanged on 0.7.0 (its test and
+browser suites were run against a packed 0.7.0 on 2026-11-24). Each step below is
+independent and can ship alone. File and function names are Copycat's as of that date.
+
+**0. Nothing to migrate.** The chat files under `<state>/chats/` load as they are and
+get a log beside them on first change. Two things to know: anything that reads
+`chats/<key>.json` directly (a script, a backup) now sees a snapshot that can be behind
+while the server runs, so use `readConversation(dir, key)` or read after a clean
+shutdown; and going back to 0.6.0 is safe after `store.close()` has run (Copycat's
+`close()` should call `await this.store.close()` for that reason; today it only closes
+the agent).
+
+**1. Proposal fates: `store.save(key)` → `store.update()`.** In `agent()`
+(`src/chat.js`), `written()` calls `this.store.save(key)`, which now compares all 200
+turns to find what changed (about 2 ms). Where a command changes one known turn, use
+`this.store.update(key, turn.id, turn => { … })` (0.1 ms) and make the change inside
+the function. Where one command touches several turns (an undo across requests), keep
+`save(key)`: it is correct, only dearer. In `runLive`, the direct
+`foldActivity(turn.activities, …); tools.save()` keeps working as it is.
+
+**2. Replace polling with the stream.** Today `extension/editor.js` calls
+`bridge.call('chat')` every 900 ms while a turn is active (`pollChat`), and the server
+answers with the whole conversation each time.
+
+- Server (`src/server.js`): add a `GET` route, say `/chat-stream?url=…`, beside the
+  operations table. It must apply the same checks the `chat` operation's route applies
+  (the stream helper does none), resolve the conversation as `chat.history` does
+  (`const conversation = await chat.conversation(url, options)`), and then
+  `streamConversation(chat.store, conversation.key, req, res)`. Routines and the `live`
+  flag are not part of the conversation: keep `bridge.call('chat')` for the first load,
+  or put them in an extra first event of Copycat's own before handing the response over.
+- Browser (`extension/editor.js`): bundle `@lyra-forge/leyline/stream-client` and, in
+  `loadChat`, replace the `pollChat()` call with
+  `chat.feed = followConversation(streamUrl, { onChange: conversation => { takeHistory({ ...history, turns: conversation.turns }); render…(); }, onGap: … })`;
+  delete `pollChat` and `chat.timer`. `takeHistory` already takes whole turn lists, so
+  the first version can ignore the individual events. The "agent replied on a comment"
+  check that `pollChat` does by counting `replied` becomes a comparison in `onChange`.
+  Close the feed where the panel is torn down.
+- **The one decision here is the owner's:** how the browser reaches that route. The
+  operations go through `bridge.call` (the extension's background page), and a streamed
+  `fetch` from the content script may not be allowed to reach the local server
+  directly. Either the bridge grows a streaming call (a port that relays chunks), or the
+  page fetches the stream itself where it is served by Copycat's own server. The client
+  takes a `fetch` option for exactly this. Until that is settled, polling keeps working.
+- Then turn on text: pass `onText: tools.text` in `runLive`'s `this.live.run({ … })` and
+  show `turn.preview` in the panel while a turn runs. Optional: `streamOutput: true`
+  changes what the activity item of a command holds while it runs (raw output until
+  Copycat's `describe` rewords it at the end), so leave it off unless that is wanted.
+
+**3. Asks.** Copycat runs with the sandbox as the boundary and never asks, so nothing
+is needed. To let a person approve something: pass `approvalPolicy: 'on-request'` and
+`onAsk: tools.ask` in `runLive`; give the store `onAsk: () => undefined` (or a policy
+that answers the harmless ones); add an operation `'chat-answer': (data, o) =>
+chat.answer(data.url, data, o)` that calls `this.store.answer(key, data.turn, data.ask,
+data.decision)`; and render `turn.asks` with status `pending` as a question with the
+ask's `options` as buttons. Without the store option the default policy declines at
+once and nothing changes.
+
+**4. Steering.** Give the store `steer: (input, turn, lane) => this.live.steer(lane.id,
+input)` and add an operation that calls `this.store.steer(key, turnId, text)`. In the
+composer, when a turn is running on the main lane, offer "tell the agent" beside
+"send": on `{ steered: false, reason: 'ended' }` fall back to `chat-send` with the same
+text. The package's activity feed is not wired to this: if Copycat wants "the owner
+edited section 2" to reach a running turn, it decides when and calls `store.steer`.
+
+**5. Memory across a restart.** In `runLive`, spread `...tools.resume` into
+`this.live.run({ … })`. That is all: the store keeps the thread id from each turn's
+`provenance`, and after a restart the first main-lane request resumes the thread.
+`turn.provenance.memory` then says `resumed`, or `lost` if Codex no longer has it;
+worth showing when it is `lost`. `chat.reset` already calls `store.reset`, which forgets
+the id; keep calling `this.live.reset(`${key}:main`)` there as well.
+
+**6. MCP instead of the CLI (optional).** `bin/copycat-doc.mjs` and the `/agent/` route
+stay as they are. To offer the same four operations as MCP tools, add a script that
+calls `serveMcpBridge({ app: 'copycat', name: `agent-${port}`, defaults: { page }, tools: […] })`
+with a description and schema for `show`, `edit`, `comments` and `reply`, and name it in
+`threadConfig.mcp_servers` for the live provider. Note that `disableUserExtensions`
+turns off the servers in the user's own configuration, not ones a host adds.
+
+## 6. Toucan on 0.7.0: what `server/codex.mjs` maps onto
+
+Read from `server/codex.mjs` on 2026-11-24; nothing was run.
+
+| Toucan today | With the package |
+| --- | --- |
+| `thread/start` or `thread/resume` from `this.saved[key]` | `provider.run({ key, threadId: saved })`; the store keeps the id (`tools.resume`) and `provenance.memory` says what happened |
+| `turn/steer` with `expectedTurnId`, used to send a chat message or "what people did" into a running turn | `store.steer(key, turnId, input)` or `provider.steer(key, input)`; `reason: 'ended'` is the case Toucan handles by starting a turn |
+| `item/commandExecution/requestApproval` and `item/fileChange/requestApproval` forwarded to the browser, answered by `{ type: 'approve', key, decision }` over the websocket | `approvalPolicy: 'on-request'`, `onAsk: tools.ask`, store option `onAsk: () => undefined`; the browser sees `turn.asks` and the server calls `store.answer(key, turnId, askId, decision)` |
+| every other server request answered `{ decision: 'decline' }` | answered in its own shape by the adapter |
+| `item/agentMessage/delta`, reasoning deltas and `item/commandExecution/outputDelta` sent to open tabs only | `onText: tools.text`, `onEvent: tools.activity`, `streamOutput: true`; they become `turn.text` and `turn.activity` events |
+| `this.history`: the last 400 events per canvas replayed to a tab that joins | `store.snapshot()` then `store.subscribe(key, { after })`: a snapshot plus the events after it, so a late tab gets the state rather than a replay |
+| a websocket per canvas | Toucan's websocket can stay: subscribe once per canvas with `{ raw: true }` and send each line to the canvas's sockets, with `snapshot()` for a tab that joins. Or use `streamConversation` and Server-Sent Events for the chat and keep the websocket for the canvas. |
+
+What is still missing for Toucan, as far as reading shows:
+
+- **Its event vocabulary is not the package's.** Toucan's browser expects `delta`,
+  `reasoning`, `output`, `plan`, `approved` and item events keyed by Codex item ids; the
+  package sends turn-shaped events (`turn.text`, `turn.activity` with folded items,
+  `turn.ask`). `app/Chat.tsx` would be rewritten onto turns, or a mapper written in
+  Toucan. This is the largest piece of the move and is UI work, not protocol work.
+- **Plans.** Toucan treats `turn/plan/updated` specially (only the latest plan is
+  replayed). The adapter reports a plan as an ordinary activity item from the `plan`
+  thread item and does not read `turn/plan/updated` or `item/plan/delta`.
+- **Several people on one canvas.** The store's asks are answered by whoever calls
+  `answer()` first; Toucan would decide who may. Presence, the brief and reflexes stay
+  in Toucan as before.
+- **Steering as a first message.** Toucan steers with several inputs at once (what
+  people did, the selection, the message). `steer` takes a list of strings as parts of
+  one message, which covers that; images or mentions as steer input are not passed
+  through (the adapter sends text parts only).
+- **Not verified:** that Toucan's `approvalPolicy: 'on-request'` threads behave the same
+  when the policy is also named on each `turn/start`, as the adapter now does; and
+  whether Toucan relies on `thread/resume` returning the thread's turns, which the
+  adapter does not ask for (`excludeTurns: true`).
