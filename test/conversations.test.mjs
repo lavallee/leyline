@@ -2,13 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir, stat, writeFile, mkdir, chmod } from 'node:fs/promises';
 import path from 'node:path';
-import { createConversationStore as create, ConversationError, fileNameFor, TURN_STATUSES } from '../server/conversations.mjs';
+import { createConversationStore as create, ConversationError, fileNameFor, logNameFor, readConversation, TURN_STATUSES } from '../server/conversations.mjs';
 import { tempDir, until, deferred, beforeCleanup } from './helpers.mjs';
 
 // Every store a test makes is closed before its folder is removed.
 const createConversationStore = options => { const store = create(options); beforeCleanup(() => store.close()); return store; };
 
-const onDisk = async (dir, key) => JSON.parse(await readFile(path.join(dir, fileNameFor(key)), 'utf8'));
+const onDisk = async (dir, key) => { const found = await readConversation(dir, key); if (!found) throw new Error('nothing on disk'); return found; };
 const settled = turn => until(() => ['succeeded', 'failed', 'stopped'].includes(turn.status));
 
 test('a request is queued, run and stored with its reply', async t => {
@@ -47,9 +47,9 @@ test('files are private, written atomically, and safe for any key', async t => {
   for (const key of ['plain_key-1', odd]) await settled(await store.send(key, { user: 'x' }));
   await store.flush();
   const names = (await readdir(dir)).sort();
-  assert.equal(names.length, 2);
-  assert.ok(names.includes('plain_key-1.json'));
-  assert.ok(names.every(name => /^[A-Za-z0-9_-]+\.json$/.test(name)), `no path characters and no leftover temporary files: ${names}`);
+  assert.equal(names.length, 4, 'a snapshot and an event log for each');
+  assert.ok(names.includes('plain_key-1.json') && names.includes(logNameFor('plain_key-1')));
+  assert.ok(names.every(name => /^[A-Za-z0-9_-]+(\.json|\.events\.jsonl)$/.test(name)), `no path characters and no leftover temporary files: ${names}`);
   for (const name of names) assert.equal((await stat(path.join(dir, name))).mode & 0o777, 0o600);
   assert.equal((await stat(dir)).mode & 0o777, 0o700);
   assert.equal((await onDisk(dir, odd)).key, odd);

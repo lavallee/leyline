@@ -1,7 +1,20 @@
 // The turn store behind a chat panel: conversations keyed by a host string, each a list
-// of turns, kept in one private JSON file per conversation. It queues requests, runs
-// them side by side in lanes up to a cap, records activity as it arrives, and survives a
-// restart. Generalised from the stores Copycat and Skein each wrote (their src/chat.js).
+// of turns. It queues requests, runs them side by side in lanes up to a cap, records
+// activity as it arrives, and survives a restart. Generalised from the stores Copycat and
+// Skein each wrote (their src/chat.js).
+//
+// On disk a conversation is two private files:
+//   <name>.json            a snapshot: { key, ...fields, turns, eventSeq }, written whole
+//   <name>.events.jsonl    a log: a header line, then one JSON line per event since the snapshot
+// Every change to a conversation is an event with a sequence number (./events.mjs). An
+// update appends lines to the log; now and then the log is folded into a new snapshot
+// (compaction). A reader takes the snapshot and replays the events numbered after it. A
+// `<name>.json` file written by an earlier version (no log, no eventSeq) is read as it is
+// and gets a log when it next changes.
+//
+// The store finds out what changed by comparing each turn with what it last recorded, so
+// a host may change a turn directly: during a run and then call tools.save(), or
+// afterwards and then call store.save(key), or, cheapest, through store.update().
 //
 // It knows nothing about documents, prompts or agents. The host supplies
 //   run(turn, lane, signal, tools) -> Promise<{ message, ...fields }>
@@ -15,14 +28,18 @@
 // never changes, so an agent keyed by it keeps its memory from turn to turn. A request
 // that starts while the main lane is busy gets a side lane with an id of its own, used
 // once: a fresh agent. `maxLanes: 1` gives a strict one-at-a-time queue.
-import { mkdir, open as openFile, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { createHash, randomUUID } from 'node:crypto';
+import { appendFile, mkdir, open as openFile, readFile, readdir, rename, rm, stat, truncate, writeFile } from 'node:fs/promises';
+import { createHash, hash, randomBytes, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { foldActivity, settleActivity } from './providers/contract.mjs';
+import { applyEvent, formatCursor, parseCursor } from './events.mjs';
 
 export const TURN_STATUSES = ['queued', 'running', 'succeeded', 'failed', 'stopped'];
 const SAFE_KEY = /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/;
 const RESERVED = ['id', 'status', 'createdAt', 'startedAt', 'finishedAt', 'activities'];
+const FINAL = ['succeeded', 'failed', 'stopped'];
+const LOG_VERSION = 1;
+const MAX_PREVIEW = 200000;
 
 const MESSAGES = {
   interrupted: 'The server restarted before this request finished. It is kept; send it again to continue.',
@@ -48,19 +65,187 @@ export class ConversationError extends Error {
 
 /** The file name a key is stored under: the key itself when it is plainly safe, a hash of it otherwise. */
 export const fileNameFor = key => `${SAFE_KEY.test(key) ? key : createHash('sha256').update(key).digest('hex').slice(0, 32)}.json`;
+/** The file name of a key's event log, beside its snapshot. */
+export const logNameFor = key => fileNameFor(key).replace(/\.json$/, '.events.jsonl');
+
+// ---------------------------------------------------------------- what changed in a turn
+// A shadow is what the store last recorded of a turn: enough to tell what has changed
+// since, without keeping a second copy. Strings are kept by reference (they cannot change
+// underneath us), everything else as its JSON, or a digest of it when that is long.
+const mark = json => json.length <= 1024 ? json : `#${hash('sha1', json, 'base64')}`;
+const newShadow = () => ({ strings: new Map(), marks: new Map(), items: null, order: null, waiting: null });
+// Activity items the store can follow one by one: objects with an id of their own.
+function followable(items) {
+  const ids = new Set();
+  for (const item of items) {
+    if (!item || typeof item !== 'object' || Array.isArray(item) || (typeof item.id !== 'string' && typeof item.id !== 'number')) return false;
+    if (item.text !== undefined && typeof item.text !== 'string') return false;
+    if (ids.has(item.id)) return false;
+    ids.add(item.id);
+  }
+  return true;
+}
+// What changed in one activity item since it was recorded, or null; the record is brought up to date.
+function itemDelta(shadow, item, added) {
+  const { text, ...rest } = item, fields = JSON.stringify(rest), had = shadow.items.get(rest.id);
+  let delta = null;
+  if (!had) { shadow.order.push(rest.id); delta = { id: rest.id, fields: rest, text: text ?? null }; }
+  else {
+    if (had.fields !== fields) delta = { id: rest.id, fields: rest };
+    if (had.text !== text) {
+      delta ||= { id: rest.id };
+      // `added` is what the caller knows it put on the end; the lengths say whether that is all that happened.
+      const more = typeof text !== 'string' ? null : added && typeof had.text === 'string' && text.length === had.text.length + added.length ? added : textDelta(had.text, text);
+      if (more !== null) delta.append = more; else delta.text = text ?? null;
+    }
+  }
+  if (delta) shadow.items.set(rest.id, { fields, text });
+  return delta;
+}
+// Two changes to one item, as one.
+function mergeDelta(first, next) {
+  if (next.fields) first.fields = next.fields;
+  if ('text' in next) { first.text = next.text; delete first.append; }
+  else if (next.append) { if (typeof first.text === 'string') first.text += next.append; else if ('text' in first) first.text = next.append; else first.append = (first.append || '') + next.append; }
+  return first;
+}
+// What was added, when a text is the old one with more at the end. (A slice and a comparison: startsWith walks character by character.)
+const textDelta = (old, text) => old !== undefined && old.length >= 16 && text.length > old.length && text.slice(0, old.length) === old ? text.slice(old.length) : null;
+
+/**
+ * Compares a turn (or any object) with its shadow, brings the shadow up to date, and
+ * returns what changed as the body of an event ({ set?, unset?, append?, activities? }),
+ * or null when nothing did. `skip` names fields that are not compared.
+ */
+function difference(target, shadow, skip = NONE) {
+  let set, unset, append, activities;
+  const seen = new Set();
+  for (const name of Object.keys(target)) {
+    const value = target[name];
+    if (value === undefined || typeof value === 'function' || typeof value === 'symbol' || skip.has(name)) continue;
+    seen.add(name);
+    if (typeof value === 'string') {
+      const old = shadow.strings.get(name);
+      if (old === value) continue;
+      const more = textDelta(old, value);
+      if (more !== null) (append ||= {})[name] = more; else (set ||= {})[name] = value;
+      shadow.strings.set(name, value); shadow.marks.delete(name);
+      if (name === 'activities') shadow.items = null;
+      continue;
+    }
+    if (name === 'activities' && Array.isArray(value) && followable(value)) {
+      shadow.strings.delete(name); shadow.marks.delete(name);
+      let whole = !shadow.items;
+      if (!whole) { const order = shadow.order; whole = value.length < order.length; for (let i = 0; !whole && i < order.length; i++) whole = value[i].id !== order[i]; }
+      if (whole) { shadow.items = new Map(); shadow.order = []; }
+      const deltas = [];
+      for (let i = 0; i < value.length; i++) { const delta = itemDelta(shadow, value[i]); if (delta) deltas.push(delta); }
+      if (whole) (set ||= {})[name] = value; else if (deltas.length) activities = deltas;
+      continue;
+    }
+    let json;
+    try { json = JSON.stringify(value); } catch { json = undefined; }
+    if (json === undefined) { seen.delete(name); continue; }   // nothing JSON can hold: as if it were not there
+    const now = mark(json);
+    if (name === 'activities') shadow.items = null;
+    if (shadow.marks.get(name) === now && !shadow.strings.has(name)) continue;
+    (set ||= {})[name] = value;
+    shadow.marks.set(name, now); shadow.strings.delete(name);
+  }
+  for (const map of [shadow.strings, shadow.marks]) for (const name of [...map.keys()]) if (!seen.has(name)) { (unset ||= []).push(name); map.delete(name); }
+  if (shadow.items && !seen.has('activities')) { (unset ||= []).push('activities'); shadow.items = null; shadow.order = null; }
+  return set || unset || append || activities ? { ...(set ? { set } : {}), ...(unset ? { unset } : {}), ...(append ? { append } : {}), ...(activities ? { activities } : {}) } : null;
+}
+const NONE = new Set(), NOT_FIELDS = new Set(['key', 'turns', 'eventSeq']);
+
+// The name an event gets, from what it changes. Consumers may ignore it: see ./events.mjs.
+function kindOf(change) {
+  if (change.set?.status) return FINAL.includes(change.set.status) ? 'turn.finished' : 'turn.status';
+  const names = [...Object.keys(change.set || {}), ...(change.unset || []), ...Object.keys(change.append || {})];
+  if (!names.length) return 'turn.activity';
+  if (change.activities || names.length !== 1) return 'turn.patch';
+  return { preview: 'turn.text', asks: 'turn.ask', steers: 'turn.steer', proposals: 'turn.proposals' }[names[0]] || 'turn.patch';
+}
+
+// ---------------------------------------------------------------- reading what is on disk
+const absent = error => ['ENOENT', 'ENOTDIR'].includes(error?.code);
+
+// A log as it was read: the events numbered after `base`, how many bytes of the file are
+// whole lines, and what is wrong with it, if anything. A last line with no line ending is
+// a write a dying process did not finish; it is not an error, and is left out.
+function readLog(bytes, key, base) {
+  const end = bytes.lastIndexOf(10) + 1, events = [];
+  const result = { events, good: end, torn: end < bytes.length, lines: 0, problem: null, header: false };
+  let expected = base + 1, first = true;
+  for (const line of bytes.subarray(0, end).toString('utf8').split('\n')) {
+    if (!line) continue;
+    let value; try { value = JSON.parse(line); } catch { value = null; }
+    if (first) {
+      first = false;
+      if (!value || typeof value !== 'object' || value.log !== LOG_VERSION) { result.problem = 'corrupt'; return result; }
+      if (value.key !== key) { result.problem = 'foreign'; return result; }
+      // A log that starts after the snapshot ends belongs to a snapshot that is no longer there.
+      if (!Number.isSafeInteger(value.base) || value.base > base) { result.problem = 'corrupt'; return result; }
+      result.header = true;
+      continue;
+    }
+    result.lines++;
+    if (!value || typeof value !== 'object' || !Number.isSafeInteger(value.seq)) { result.problem = 'corrupt'; return result; }
+    if (value.seq <= base) continue;           // already in the snapshot: a crash between writing it and starting the new log
+    if (value.seq !== expected) { result.problem = 'corrupt'; return result; }
+    events.push(value); expected++;
+  }
+  return result;
+}
+
+/**
+ * Reads a conversation from a store's folder without a store: the snapshot with its log
+ * replayed. For tools and tests that look at the files as a stranger would. Changes
+ * nothing on disk. Resolves to the conversation ({ key, turns, ...fields }) or null when
+ * there is none; rejects when a file cannot be read or is not a conversation.
+ */
+export async function readConversation(dir, key) {
+  let conversation = null, base = 0;
+  const text = await readFile(path.join(dir, fileNameFor(key)), 'utf8').catch(error => { if (absent(error)) return undefined; throw error; });
+  if (text !== undefined) {
+    const read = JSON.parse(text);
+    if (!read || typeof read !== 'object' || !Array.isArray(read.turns)) throw new ConversationError('That file is not a conversation.', 'corrupt');
+    base = Number.isSafeInteger(read.eventSeq) ? read.eventSeq : 0;
+    conversation = { ...read, key }; delete conversation.eventSeq;
+  }
+  const bytes = await readFile(path.join(dir, logNameFor(key))).catch(error => { if (absent(error)) return null; throw error; });
+  if (bytes) {
+    const log = readLog(bytes, key, base);
+    if (log.problem) throw new ConversationError(`That conversation's event log is ${log.problem === 'foreign' ? 'for another conversation' : 'damaged'}.`, 'corrupt');
+    conversation ||= { key, turns: [] };
+    for (const event of log.events) if (!applyEvent(conversation, event)) throw new ConversationError('That conversation\'s event log does not fit its snapshot.', 'corrupt');
+  }
+  return conversation;
+}
 
 /**
  * @param {object} options
  * @param {string} options.dir where conversations are kept; created private (0700), files 0600
  * @param {(turn: object, lane: object, signal: AbortSignal, tools: object) => Promise<object>} options.run
  *   lane: { id, name, main, key }.
- *   tools: { payload, conversation, activity(event), save() }. `payload` is whatever the
- *   host passed to send() and is never written to disk; `activity` folds a provider event
- *   into turn.activities; `save` schedules a write after the host changes the turn itself.
+ *   tools: { payload, conversation, activity(event), text(piece, { segment }), save() }. `payload` is
+ *   whatever the host passed to send() and is never written to disk; `activity` folds a provider event
+ *   into turn.activities; `text` adds a piece of the reply to turn.preview while it arrives (the field is
+ *   removed when the turn finishes and `message` holds the reply); `save` records what the host changed
+ *   on the turn itself.
  * @param {number} [options.maxLanes] requests running at once per conversation; default 4
  * @param {number} [options.maxTurns] default 200
  * @param {number} [options.maxActivities] per turn; default 200
  * @param {number} [options.saveDelay] milliseconds activity writes are batched for; default 600
+ * @param {number} [options.coalesce] milliseconds a running turn's activity and text are gathered for before
+ *   they become one event for subscribers (and one line of the log); default 50. Never longer than saveDelay.
+ * @param {number} [options.coalesceChars] characters of new text after which the event is made at once; default 4000
+ * @param {number} [options.compactEvery] events in a conversation's log after which it is folded into a new
+ *   snapshot; default 1000
+ * @param {number} [options.compactBytes] the same, by the log's size; default 1,000,000
+ * @param {number} [options.keepEvents] recent events kept in memory per conversation, for subscribers that
+ *   resume; default 2000. A subscriber that asks for something older is told there is a gap.
+ * @param {number} [options.keepBytes] the same, by size; default 4,000,000
  * @param {object} [options.messages] wording overrides; see MESSAGES in this file. `interrupted`,
  *   `removed` and `stopped` may each be a function of the turn, for a host whose wording
  *   depends on the kind of request (what a stopped request leaves behind, say).
@@ -70,17 +255,19 @@ export const fileNameFor = key => `${SAFE_KEY.test(key) ? key : createHash('sha2
  * @param {(record: object) => void} [options.onCall] one record per finished turn; see ./telemetry.mjs
  * @param {(error: Error) => void} [options.onError] problems that have nowhere else to go (a failed write, a throwing hook,
  *   a file that was not a conversation and has been moved aside)
- * @param {boolean} [options.fsync] flush each file to the disk before it replaces the old one, and the folder
- *   after. Slower; survives a power cut. Default false: a write survives the process dying, not the machine.
+ * @param {boolean} [options.fsync] flush each write to the disk (a snapshot before it replaces the old one, and the
+ *   folder after; the log after each append). Slower; survives a power cut. Default false: a write survives the
+ *   process dying, not the machine.
  * @param {number} [options.stopGrace] milliseconds a stopped run is given to settle before its turn is recorded
  *   as stopped anyway and its lane freed; what the run returns later is dropped. Default: wait for the run.
  * @param {number} [options.evictAfter] milliseconds after which a conversation nobody has used, with nothing
- *   running, waiting or unwritten, is dropped from memory (it is read again on the next open()). Default: never.
+ *   running, waiting, unwritten or subscribed, is dropped from memory (it is read again on the next open()). Default: never.
  *   A host that holds on to conversation objects must not set it: after an eviction open() gives a new object.
  */
 export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200, maxActivities = 200, saveDelay = 600, messages = {},
   describeFailure = error => String(error?.message || error).slice(0, 300), describeActivity, onLaneClosed, onCall, onError: report = () => {},
-  fsync = false, stopGrace = Infinity, evictAfter = Infinity } = {}) {
+  fsync = false, stopGrace = Infinity, evictAfter = Infinity, coalesce = 50, coalesceChars = 4000, compactEvery = 1000, compactBytes = 1_000_000,
+  keepEvents = 2000, keepBytes = 4_000_000 } = {}) {
   if (typeof dir !== 'string' || !dir) throw new TypeError('Give the store a directory.');
   if (typeof run !== 'function') throw new TypeError('Give the store a run(turn, lane, signal, tools) function.');
   const words = { ...MESSAGES, ...messages };
@@ -91,6 +278,7 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
   const queues = new Map();         // key -> [{ turn, payload }]
   const running = new Map();        // lane id -> { turn, lane, controller, timer }
   const files = new Map();          // key -> { writing: Promise|null, queued: { promise, resolve, reject }|null }
+  const logs = new Map();           // key -> the conversation's event log: see newLog()
   const sending = new Map();        // key -> requests accepted but not yet written
   const arriving = new Map();       // turn -> the promise of the send() that is writing it
   const resets = new Map();         // key -> the reset in progress
@@ -98,6 +286,7 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
   const inFlight = new Set();       // every write not yet settled
   let folder = null, serial = 0, sweeper = null, closed = false, sealed = false;
   const now = () => new Date().toISOString();
+  const emitDelay = Math.max(0, Math.min(coalesce, saveDelay));
   // A host's own error handler must not be able to break the store either.
   const onError = error => { try { report(error); } catch { /* nothing more to do */ } };
   const guard = fn => { try { return fn(); } catch (error) { onError(error); } };
@@ -140,15 +329,134 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
     if (fsync) { const handle = await openFile(path.dirname(file), 'r').catch(() => null); if (handle) try { await handle.sync(); } catch { /* not every file system allows it */ } finally { await handle.close(); } }
   }
 
+  // Lines added to the end of a log. A process that dies part-way leaves at worst one
+  // unfinished last line, which the next reader leaves out.
+  async function append(file, text) {
+    await ready();
+    if (!fsync) return appendFile(file, text, { mode: 0o600 });
+    const handle = await openFile(file, 'a', 0o600);
+    try { await handle.appendFile(text); await handle.sync(); } finally { await handle.close(); }
+  }
+
+  // ---------------------------------------------------------------- events
+  // A conversation's log, in memory:
+  //   seq       the number of the last event made
+  //   epoch     a name for this loading of the conversation. Sequence numbers handed out
+  //             before a restart may never have reached the disk, so a position is only
+  //             good within the epoch it came from.
+  //   pending   lines made but not yet appended to the file
+  //   recent    the last events, for subscribers that resume; `floor` is the number before the oldest
+  //   shadows   turn -> what was last recorded of it
+  const newLog = (seq = 0) => ({ seq, base: seq, epoch: randomBytes(5).toString('hex'), pending: [], recent: [], recentBytes: 0, floor: seq,
+    subscribers: new Set(), shadows: new Map(), fields: newShadow(), dirty: new Set(), snapshot: false, header: false, lines: 0, bytes: 0, compact: false });
+
+  function emit(log, body) {
+    const event = { seq: log.seq + 1, at: now(), ...body };
+    let line;
+    try { line = JSON.stringify(event); } catch (error) { onError(error); return null; }
+    log.seq++;
+    log.pending.push(line);
+    const entry = { seq: event.seq, line, event: null };
+    log.recent.push(entry); log.recentBytes += line.length;
+    while (log.recent.length > keepEvents || (log.recentBytes > keepBytes && log.recent.length > 1)) { const gone = log.recent.shift(); log.recentBytes -= gone.line.length; log.floor = gone.seq; }
+    for (const subscriber of log.subscribers) subscriber.deliver(entry);
+    return entry;
+  }
+
+  // Activity the store folded in itself is recorded item by item as it arrives (the store
+  // knows which item changed, so nothing else is compared) and waits here to go out as one event.
+  function noteItem(log, turn, item, added) {
+    const shadow = log.shadows.get(turn);
+    if (!shadow?.items || !(shadow.items.has(item.id) || turn.activities[shadow.order.length] === item) || (item.text !== undefined && typeof item.text !== 'string')) return false;
+    const delta = itemDelta(shadow, item, added);
+    if (!delta) return true;
+    const waiting = shadow.waiting ||= new Map(), first = waiting.get(delta.id);
+    if (first) mergeDelta(first, delta); else waiting.set(delta.id, delta);
+    return true;
+  }
+  function emitWaiting(log, turn, shadow) {
+    const activities = [...shadow.waiting.values()];
+    shadow.waiting = null;
+    emit(log, { type: 'turn.activity', turnId: turn.id, activities });
+  }
+
+  // Records what has changed on one turn since it was last recorded.
+  function syncTurn(log, turn) {
+    log.dirty.delete(turn);
+    let shadow = log.shadows.get(turn);
+    if (shadow?.waiting) emitWaiting(log, turn, shadow);
+    if (!shadow) {
+      log.shadows.set(turn, shadow = newShadow());
+      if (emit(log, { type: 'turn.created', turn })) difference(turn, shadow); else log.shadows.delete(turn);
+      return;
+    }
+    const change = difference(turn, shadow);
+    if (change) emit(log, { type: kindOf(change), turnId: turn.id, ...change });
+  }
+  // The conversation's own fields, and the turns a run or a command has touched.
+  function sync(conversation, log) {
+    const change = difference(conversation, log.fields, NOT_FIELDS);
+    if (change) emit(log, { type: 'conversation.patch', ...change });
+    for (const turn of [...log.dirty]) if (log.shadows.has(turn)) syncTurn(log, turn); else log.dirty.delete(turn);
+  }
+  // Every turn, whether or not anyone said it changed: for a host that changed turns directly.
+  function syncAll(conversation, log) {
+    const present = new Set(conversation.turns);
+    for (const turn of [...log.shadows.keys()]) if (!present.has(turn)) { log.shadows.delete(turn); log.dirty.delete(turn); emit(log, { type: 'turn.removed', turnId: turn.id }); }
+    for (const turn of conversation.turns) if (turn && typeof turn === 'object') syncTurn(log, turn);
+    sync(conversation, log);
+  }
+
+  // Folds the log into a new snapshot. The snapshot is written first; a crash before the
+  // log is replaced leaves events the snapshot already holds, which a reader skips.
+  async function compactNow(conversation, log) {
+    const key = conversation.key;
+    syncAll(conversation, log);
+    const base = log.seq, covered = log.pending;
+    log.pending = []; log.compact = false;
+    const snapshot = JSON.stringify({ ...conversation, eventSeq: base }, null, 2);
+    try { await write(path.join(dir, fileNameFor(key)), snapshot); }
+    catch (error) { log.pending = covered.concat(log.pending); log.compact = true; throw error; }
+    log.snapshot = true; log.base = base;
+    if (!log.header) return;                                   // no log file yet: the first append starts one
+    const header = `${JSON.stringify({ log: LOG_VERSION, key, base })}\n`;
+    try { await write(path.join(dir, logNameFor(key)), header); log.lines = 0; log.bytes = header.length; }
+    catch (error) { onError(error); }                          // the old log stays; what it holds is in the snapshot
+  }
+
+  async function flushLog(conversation) {
+    const key = conversation.key, log = logs.get(key);
+    if (!log) return;
+    sync(conversation, log);
+    if (log.compact || !log.snapshot || log.lines + log.pending.length >= compactEvery || log.bytes >= compactBytes) {
+      if (log.snapshot && !log.compact && !log.pending.length && !log.lines) return;
+      return compactNow(conversation, log);
+    }
+    if (!log.pending.length) return;
+    const lines = log.pending; log.pending = [];
+    const text = `${log.header ? '' : `${JSON.stringify({ log: LOG_VERSION, key, base: log.base })}\n`}${lines.join('\n')}\n`;
+    try { await append(path.join(dir, logNameFor(key)), text); }
+    catch (error) {
+      log.pending = lines.concat(log.pending);
+      // The folder was removed under us: everything goes back in one piece.
+      if (error?.code === 'ENOENT') { folder = null; log.header = false; return compactNow(conversation, log); }
+      throw error;
+    }
+    log.header = true; log.lines += lines.length; log.bytes += text.length;
+  }
+
   // Writes a conversation. Each conversation has its own queue, so a large one does not
   // hold up the others, and at most one write waits behind the one in progress: every
-  // caller that arrives meanwhile shares it, and it writes the conversation as it is when
-  // it starts. The promise resolves once the state at the time of the call is on disk.
-  function persist(conversation) {
+  // caller that arrives meanwhile shares it, and it writes what has been recorded by the
+  // time it starts. The promise resolves once the state at the time of the call is on disk.
+  // `all` compares every turn first, for a host that changed some without saying which.
+  function persist(conversation, all = false) {
     const key = conversation.key;
     // After close() has written everything, this store writes nothing more: the folder may
     // belong to another store by then, and a late write would put old state over its work.
     if (sealed) return Promise.reject(new ConversationError(words.closed, 'closed'));
+    const log = logs.get(key);
+    if (log) { if (all) syncAll(conversation, log); else sync(conversation, log); }
     let state = files.get(key);
     if (!state) files.set(key, state = { writing: null, queued: null });
     if (state.queued) return state.queued.promise;
@@ -160,7 +468,7 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
     const start = () => {
       state.queued = null;
       let work;
-      try { work = write(path.join(dir, fileNameFor(key)), JSON.stringify(conversation, null, 2)); } catch (error) { work = Promise.reject(error); }
+      try { work = flushLog(conversation); } catch (error) { work = Promise.reject(error); }
       const finished = state.writing = work.then(queued.resolve, queued.reject).then(() => {
         inFlight.delete(queued.promise);
         if (state.writing === finished) state.writing = null;
@@ -169,7 +477,16 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
     if (state.writing) state.writing.then(start); else start();
     return queued.promise;
   }
-  const unwritten = key => { const state = files.get(key); return !!state && (!!state.writing || !!state.queued); };
+  const unwritten = key => { const state = files.get(key); return !!state && (!!state.writing || !!state.queued) || !!logs.get(key)?.pending.length; };
+
+  // A file that is not what it should be is kept under another name for a person to look at.
+  async function aside(file, problem, key, what) {
+    const moved = `${file}.${problem}-${now().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 6)}`;
+    try { await rename(file, moved); }
+    catch (error) { throw Object.assign(new ConversationError(words.unreadable, 'unreadable'), { cause: error }); }
+    onError(Object.assign(new ConversationError(problem === 'foreign' ? `${what} held another conversation and was moved aside to ${moved}.`
+      : `${what} could not be read as a conversation and was moved aside to ${moved}.`, 'corrupt'), { key, file: moved }));
+  }
 
   /** Loads a conversation, or starts an empty one. Turns an earlier process left unfinished are marked failed. */
   function open(key) {
@@ -178,34 +495,59 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
     if (conversations.has(key)) return Promise.resolve(conversations.get(key));
     if (!loading.has(key)) loading.set(key, (async () => {
       try {
-        const file = path.join(dir, fileNameFor(key));
-        let stored = { key, turns: [] }, recovered = false, text;
+        const file = path.join(dir, fileNameFor(key)), logFile = path.join(dir, logNameFor(key));
+        const unreadable = error => Object.assign(new ConversationError(words.unreadable, 'unreadable'), { cause: error });
+        let stored = { key, turns: [] }, recovered = false, text, base = 0, snapshot = false, repair = false;
         // Only a file that is not there means "none yet". Any other failure to read it is
         // reported and nothing is assumed, or the next write would replace a file that may be whole.
         try { text = await readFile(file, 'utf8'); }
-        catch (error) { if (!['ENOENT', 'ENOTDIR'].includes(error?.code)) throw Object.assign(new ConversationError(words.unreadable, 'unreadable'), { cause: error }); }
+        catch (error) { if (!absent(error)) throw unreadable(error); }
         if (text !== undefined) {
           let read = null, problem = null;
           try { read = JSON.parse(text); } catch { problem = 'corrupt'; }
           if (!problem && !(read && typeof read === 'object' && Array.isArray(read.turns))) problem = 'corrupt';
           if (!problem && read.key !== undefined && read.key !== key) problem = 'foreign';
-          if (problem) {
-            // Not this conversation, or not a conversation at all. It is kept under another
-            // name for a person to look at, and the conversation starts empty.
-            const aside = `${file}.${problem}-${now().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 6)}`;
-            try { await rename(file, aside); }
-            catch (error) { throw Object.assign(new ConversationError(words.unreadable, 'unreadable'), { cause: error }); }
-            onError(Object.assign(new ConversationError(problem === 'foreign' ? `A conversation file held another conversation and was moved aside to ${aside}.`
-              : `A conversation file could not be read as a conversation and was moved aside to ${aside}.`, 'corrupt'), { key, file: aside }));
-          } else stored = { ...read, key, turns: read.turns.filter(turn => turn && typeof turn === 'object' && !Array.isArray(turn)) };
+          // Not this conversation, or not a conversation at all: the conversation starts empty.
+          if (problem) await aside(file, problem, key, 'A conversation file');
+          else {
+            stored = { ...read, key, turns: read.turns.filter(turn => turn && typeof turn === 'object' && !Array.isArray(turn)) };
+            base = Number.isSafeInteger(read.eventSeq) && read.eventSeq >= 0 ? read.eventSeq : 0; delete stored.eventSeq; snapshot = true;
+          }
         }
+        // The events since the snapshot.
+        let bytes = null, seq = base, lines = 0, size = 0, header = false;
+        try { bytes = await readFile(logFile); }
+        catch (error) { if (!absent(error)) throw unreadable(error); }
+        if (bytes) {
+          const read = readLog(bytes, key, base);
+          let problem = read.problem === 'foreign' ? 'foreign' : null;
+          if (!problem) for (const event of read.events) { if (!applyEvent(stored, event)) { problem = 'corrupt'; break; } seq = event.seq; }
+          problem ||= read.problem;
+          if (problem) {
+            // What could be replayed is kept, the file is put aside, and a snapshot of what was recovered replaces both.
+            await aside(logFile, problem, key, 'A conversation\'s event log');
+            repair = true;
+          } else {
+            // A last line a dying process did not finish is cut off, so the next line starts clean.
+            if (read.torn) try { await truncate(logFile, read.good); } catch (error) { throw unreadable(error); }
+            header = read.header; lines = read.lines; size = read.good;
+          }
+        }
+        stored.turns = stored.turns.filter(turn => turn && typeof turn === 'object' && !Array.isArray(turn));
+        const log = newLog(seq);
+        Object.assign(log, { base, snapshot, header, lines, bytes: size, compact: repair });
+        // What is on disk is the starting point for telling what changes from here on.
+        difference(stored, log.fields, NOT_FIELDS);
+        for (const turn of stored.turns) { const shadow = newShadow(); difference(turn, shadow); log.shadows.set(turn, shadow); }
         for (const turn of stored.turns) if (turn.status === 'running' || turn.status === 'queued') {
           Object.assign(turn, { status: 'failed', message: say('interrupted', turn), finishedAt: turn.finishedAt || now() });
           if (!Array.isArray(turn.activities)) turn.activities = [];
-          settleActivity(turn.activities, false); recovered = true;
+          settleActivity(turn.activities, false); delete turn.preview; recovered = true;
+          syncTurn(log, turn);
         }
+        logs.set(key, log);
         conversations.set(key, stored);
-        if (recovered) await persist(stored).catch(onError);
+        if (recovered || repair) await persist(stored).catch(onError);
         return stored;
       } finally { loading.delete(key); }
     })());
@@ -234,9 +576,10 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
     }
     if (conversation.turns.length >= maxTurns) throw new ConversationError(words.full, 'full');
     for (const name of [...RESERVED, '__proto__']) delete fields[name];
-    const at = now();
+    const at = now(), log = logs.get(key);
     const turn = { id: randomUUID(), user, status: 'queued', createdAt: at, startedAt: at, message: '', ...fields, activities: [] };
     conversation.turns.push(turn);
+    syncTurn(log, turn);
     // Until it is written the request counts as work in the conversation (so a reset is
     // refused), but it is not in the queue: a stop that arrives now simply marks it.
     count(sending, key, 1);
@@ -244,8 +587,11 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
       if (turn.status !== 'queued' || !conversation.turns.includes(turn)) return;   // stopped, or the store closed, meanwhile
       const queue = queues.get(key) || []; queues.set(key, queue);
       queue.push({ turn, payload });
-    }, error => { const index = conversation.turns.indexOf(turn); if (index >= 0) conversation.turns.splice(index, 1); throw error; })
-      .finally(() => { count(sending, key, -1); arriving.delete(turn); });
+    }, error => {
+      const index = conversation.turns.indexOf(turn);
+      if (index >= 0) { conversation.turns.splice(index, 1); if (log.shadows.delete(turn)) emit(log, { type: 'turn.removed', turnId: turn.id }); log.dirty.delete(turn); }
+      throw error;
+    }).finally(() => { count(sending, key, -1); arriving.delete(turn); });
     arriving.set(turn, written.catch(() => {}));
     await written;
     pump(conversation);
@@ -260,7 +606,7 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
       const next = queue.shift();
       const name = busy.some(r => r.lane.main) ? next.turn.id.slice(0, 8) : 'main';
       const lane = { id: `${key}:${name}`, name, main: name === 'main', key };
-      const runtime = { turn: next.turn, lane, controller: new AbortController(), timer: null, grace: null };
+      const runtime = { turn: next.turn, lane, controller: new AbortController(), timer: null, grace: null, soon: null, fresh: 0 };
       running.set(lane.id, runtime);
       execute(conversation, next, runtime).catch(onError).finally(() => {
         // The main lane may already have been taken again by the next turn: only this turn's own entry goes.
@@ -273,16 +619,48 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
   }
 
   async function execute(conversation, { turn, payload }, runtime) {
-    const { lane, controller } = runtime;
+    const { lane, controller } = runtime, log = logs.get(conversation.key);
     // Once the turn has its final status nothing more is recorded on it, whatever a run that outlived it does.
-    const save = () => { if (runtime.done) return; runtime.timer ||= setTimeout(() => { runtime.timer = null; persist(conversation).catch(onError); }, saveDelay); };
-    const activity = event => { if (runtime.done) return null; const item = foldActivity(turn.activities, event, { max: maxActivities, describe: describeActivity }); if (item) save(); return item; };
+    // What changed becomes an event for subscribers after `coalesce` (at once when a lot of
+    // text has arrived), and reaches the disk after `saveDelay`.
+    const soon = () => {
+      runtime.soon = null; runtime.fresh = 0;
+      if (runtime.done) return;
+      const shadow = log.shadows.get(turn);
+      if (runtime.changed) { runtime.changed = false; syncTurn(log, turn); } else if (shadow?.waiting) emitWaiting(log, turn, shadow);
+    };
+    // `changed`: the host altered the turn itself, so all of it is compared; otherwise only what the store folded in is sent.
+    const save = (size = 0, changed = true) => {
+      if (runtime.done) return;
+      log.dirty.add(turn);
+      if (changed) runtime.changed = true;
+      runtime.fresh += size;
+      if (runtime.fresh >= coalesceChars) { clearTimeout(runtime.soon); soon(); }
+      else if (emitDelay < saveDelay) runtime.soon ||= setTimeout(soon, emitDelay);
+      runtime.timer ||= setTimeout(() => { runtime.timer = null; runtime.fresh = 0; runtime.changed = false; persist(conversation).catch(onError); }, saveDelay);
+    };
+    const activity = event => {
+      if (runtime.done) return null;
+      const item = foldActivity(turn.activities, event, { max: maxActivities, describe: describeActivity });
+      // Text the fold only added to the end is known without comparing; anything else that touched the text is compared.
+      const added = typeof event?.append === 'string' && event.text === undefined && !event.output && !describeActivity ? event.append : null;
+      if (item) save(typeof event?.append === 'string' ? event.append.length : 0, !noteItem(log, turn, item, added));
+      return item;
+    };
+    // The reply as it arrives. A new segment (the agent began another message) starts the preview again.
+    const text = (piece, { segment = 0 } = {}) => {
+      if (runtime.done || typeof piece !== 'string' || !piece) return;
+      if (segment !== runtime.segment) { runtime.segment = segment; turn.preview = ''; }
+      turn.preview = `${turn.preview || ''}${piece}`.slice(-MAX_PREVIEW);
+      save(piece.length);
+    };
     let result, failure;
     Object.assign(turn, { status: 'running', startedAt: now(), lane: lane.name });
+    syncTurn(log, turn);
     try {
       await persist(conversation);
       if (controller.signal.aborted) throw new Error(MESSAGES.stopped);   // stopped before it began: the host's run is never called
-      const work = Promise.resolve().then(() => run(turn, lane, controller.signal, { payload, conversation, activity, save }));
+      const work = Promise.resolve().then(() => run(turn, lane, controller.signal, { payload, conversation, activity, text, save: () => save() }));
       work.catch(() => {});
       result = await Promise.race([work, new Promise((_, reject) => { runtime.abandon = () => reject(new Error(MESSAGES.stopped)); })]);
       if (controller.signal.aborted) throw new Error(MESSAGES.stopped);
@@ -297,9 +675,12 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
     }
     runtime.done = true;
     clearTimeout(runtime.timer); runtime.timer = null;
+    clearTimeout(runtime.soon); runtime.soon = null;
     clearTimeout(runtime.grace); runtime.grace = null;
     settleActivity(turn.activities, turn.status === 'succeeded');
     turn.finishedAt = now();
+    delete turn.preview;
+    syncTurn(log, turn);
     await persist(conversation).catch(onError);
     if (onCall) guard(() => onCall({ key: conversation.key, lane: lane.id, turnId: turn.id, status: turn.status,
       startedAt: turn.startedAt, finishedAt: turn.finishedAt, durationMs: Date.parse(turn.finishedAt) - Date.parse(turn.startedAt),
@@ -320,6 +701,7 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
       const queue = queues.get(key) || [], at = queue.findIndex(q => q.turn === found);
       if (at >= 0) queue.splice(at, 1);
       Object.assign(found, { status: 'stopped', message: say('removed', found), finishedAt: now() });
+      syncTurn(logs.get(key), found);
       await persist(conversation);
     } else if (found.status === 'running') {
       const runtime = lanesOf(key).find(r => r.turn === found);
@@ -337,6 +719,22 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
   }
 
   /**
+   * Changes one turn and records the change: the supported way to alter a turn outside its
+   * run (the fate of a proposal on a finished turn, say). `change(turn)` alters the turn in
+   * place and may be async. Only that turn is compared with what was recorded, so the cost
+   * does not grow with the conversation. Resolves to the turn once the change is on disk.
+   */
+  async function update(key, id, change) {
+    const conversation = await open(key), found = await turn(key, id);
+    if (typeof change !== 'function') throw new ConversationError('Give update() a function that changes the turn.', 'invalid');
+    await change(found);
+    const log = logs.get(key);
+    if (log?.shadows.has(found)) syncTurn(log, found);
+    await persist(conversation);
+    return found;
+  }
+
+  /**
    * Starts the conversation afresh. The old turns are copied to `archive/` first.
    * Refused with code 'busy' while anything is running or waiting.
    */
@@ -348,11 +746,15 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
     // From here until the empty conversation is written, requests for this key wait: none
     // can slip into the turns being archived, or run outside the conversation that replaces them.
     const work = (async () => {
+      const log = logs.get(key);
       if (conversation.turns.length) {
         const archive = path.join(dir, 'archive'); await mkdir(archive, { recursive: true, mode: 0o700 });
         await write(path.join(archive, `${now().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 6)}.json`), JSON.stringify(conversation, null, 2));
       }
       conversation.turns = [];
+      log.shadows.clear(); log.dirty.clear();
+      emit(log, { type: 'reset' });
+      log.compact = true;                                       // the empty conversation is a new snapshot, and the log starts again
       await persist(conversation);
       return conversation;
     })();
@@ -362,10 +764,70 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
 
   const busy = key => lanesOf(key).length > 0 || (queues.get(key)?.length || 0) > 0 || sending.has(key);
 
-  /** Drops an idle conversation from memory; open() reads it again. False, and nothing happens, while it has work or unwritten changes. */
+  // ---------------------------------------------------------------- subscribing
+  /**
+   * The conversation as it is now, with the position in its stream that it corresponds to:
+   * { key, cursor, epoch, seq, conversation }. `conversation` is a copy. Subscribing with
+   * `after: cursor` then delivers exactly the events that follow.
+   */
+  async function snapshot(key) {
+    const conversation = await open(key), log = logs.get(key);
+    sync(conversation, log);
+    return { key, cursor: formatCursor(log.epoch, log.seq), epoch: log.epoch, seq: log.seq, conversation: JSON.parse(JSON.stringify(conversation)) };
+  }
+
+  /**
+   * Calls `listener(event, { seq, cursor })` for every event of a conversation after a
+   * position, then for each new one as it happens.
+   * @param {string} key
+   * @param {object} [options]
+   * @param {string|number} [options.after] a cursor from snapshot() or from an earlier event, or a bare
+   *   sequence number from this process. Left out: only events from now on.
+   * @param {boolean} [options.raw] deliver each event as its JSON text instead of an object (for a stream
+   *   helper that would only turn it back into text)
+   * @param {Function} listener An event object is shared between subscribers: do not change it.
+   *   When the position asked for is no longer held (it is older than `keepEvents`, or from
+   *   before a restart), the listener first receives { type: 'gap', seq, cursor }: what it has
+   *   is out of date and it should take snapshot() again; live events follow from there. When
+   *   the store closes or drops the conversation from memory it receives { type: 'closed' }.
+   * @returns {(() => void) & {ready: Promise<{cursor: string, seq: number, epoch: string}>}} call it to stop.
+   *   `ready` resolves once the events asked for have been delivered and the subscription is live.
+   */
+  function subscribe(key, options, listener) {
+    if (typeof options === 'function') { listener = options; options = {}; }
+    const { after, raw = false } = options || {};
+    if (typeof listener !== 'function') throw new TypeError('Give subscribe() a listener.');
+    let stopped = false, subscriber = null;
+    const tell = (entry, extra) => guard(() => listener(raw ? entry.line : (entry.event ||= JSON.parse(entry.line)), { seq: entry.seq, cursor: formatCursor(logs.get(key)?.epoch ?? '0', entry.seq), ...extra }));
+    const stop = () => { stopped = true; if (subscriber) logs.get(key)?.subscribers.delete(subscriber); };
+    stop.ready = open(key).then(conversation => {
+      const log = logs.get(key);
+      const here = () => ({ cursor: formatCursor(log.epoch, log.seq), seq: log.seq, epoch: log.epoch });
+      const ended = () => { const end = { type: 'closed' }; tell({ seq: log.seq, line: JSON.stringify(end), event: raw ? null : end }, { closed: true }); };
+      if (stopped) return here();
+      if (closed) { ended(); return here(); }                   // a closed store has nothing more to say, and says so
+      sync(conversation, log);
+      if (after !== undefined && after !== null) {
+        const from = parseCursor(after);
+        if (!from || (from.epoch !== null && from.epoch !== log.epoch) || from.seq > log.seq || from.seq < log.floor) {
+          const gap = { type: 'gap', seq: log.seq, cursor: formatCursor(log.epoch, log.seq) };
+          tell({ seq: log.seq, line: JSON.stringify(gap), event: raw ? null : gap }, { gap: true });
+        } else for (const entry of log.recent.slice(log.recent.findIndex(e => e.seq > from.seq) >>> 0)) { if (stopped) break; tell(entry); }
+      }
+      if (stopped) return here();
+      subscriber = { deliver: tell, end: ended };
+      log.subscribers.add(subscriber);
+      return here();
+    });
+    stop.ready.catch(() => {});
+    return stop;
+  }
+  const endSubscribers = key => { const log = logs.get(key); if (!log) return; const all = [...log.subscribers]; log.subscribers.clear(); for (const subscriber of all) subscriber.end(); };
+
+  /** Drops an idle conversation from memory; open() reads it again. False, and nothing happens, while it has work, unwritten changes or subscribers. */
   function unload(key) {
-    if (!conversations.has(key) || busy(key) || unwritten(key) || resets.has(key) || loading.has(key)) return false;
-    conversations.delete(key); files.delete(key); used.delete(key);
+    if (!conversations.has(key) || busy(key) || unwritten(key) || resets.has(key) || loading.has(key) || logs.get(key)?.subscribers.size) return false;
+    conversations.delete(key); files.delete(key); used.delete(key); logs.delete(key);
     return true;
   }
   if (Number.isFinite(evictAfter) && evictAfter > 0) {
@@ -374,7 +836,7 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
   }
 
   return {
-    open, send, turn, stop, stopAll, reset, busy, unload,
+    open, send, turn, stop, stopAll, reset, busy, unload, update, snapshot, subscribe,
     /** The keys of the conversations in memory. */
     loaded: () => [...conversations.keys()],
     /** The loaded conversation for a key, or undefined before open(). */
@@ -383,23 +845,42 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
     running: laneId => { const r = running.get(laneId); return r && !r.done ? { turn: r.turn, lane: r.lane } : undefined; },
     /** The lanes at work on a conversation. */
     lanes: key => lanesOf(key).map(r => ({ turn: r.turn, lane: r.lane })),
-    /** Schedules nothing, writes now. For a host that changed a conversation outside a run. */
-    save: async key => persist(await open(key)),
+    /**
+     * Records and writes, now, whatever a host changed in a conversation outside a run: every
+     * turn and the conversation's own fields are compared with what was last recorded. The
+     * comparison reads the whole conversation; update() is the cheaper way to change one turn.
+     */
+    save: async key => persist(await open(key), true),
+    /** Folds a conversation's log into its snapshot now, so that `<name>.json` alone holds all of it. */
+    compact: async key => { const conversation = await open(key), log = logs.get(key); if (log.lines || log.pending.length || !log.snapshot) log.compact = true; return persist(conversation, true); },
+    /** The position of a conversation's stream now: { cursor, epoch, seq }, or undefined before open(). */
+    position: key => { const log = logs.get(key); return log && { cursor: formatCursor(log.epoch, log.seq), epoch: log.epoch, seq: log.seq }; },
+    /** How many subscribers a loaded conversation has. */
+    subscribers: key => logs.get(key)?.subscribers.size ?? 0,
     /** Resolves when every write so far has reached the disk. */
     flush: async () => { while (inFlight.size) await Promise.allSettled([...inFlight]); },
-    /** Aborts everything running, drops what is waiting, and waits for the last write. Afterwards send() is refused with code 'closed'. */
+    /**
+     * Aborts everything running, drops what is waiting, and waits for the last write; each conversation's log
+     * is folded into its snapshot, so the `.json` files alone hold everything. Afterwards send() is refused
+     * with code 'closed'.
+     */
     async close() {
       closed = true;
       clearInterval(sweeper); sweeper = null;
       queues.clear();
       // Everything still waiting, in a queue or on its way into one, is removed.
-      for (const conversation of conversations.values()) for (const t of conversation.turns) if (t.status === 'queued') Object.assign(t, { status: 'stopped', message: say('removed', t), finishedAt: now() });
+      for (const conversation of conversations.values()) for (const t of conversation.turns) if (t.status === 'queued') { Object.assign(t, { status: 'stopped', message: say('removed', t), finishedAt: now() }); logs.get(conversation.key)?.dirty.add(t); }
       const active = [...running.values()];
       for (const r of active) r.controller.abort();
       const until = Date.now() + 2000;
       while (running.size && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 10));
-      for (const conversation of conversations.values()) await persist(conversation).catch(onError);
+      for (const conversation of conversations.values()) {
+        const log = logs.get(conversation.key);
+        if (log && (log.lines || log.pending.length || log.dirty.size)) log.compact = true;
+        await persist(conversation, true).catch(onError);
+      }
       while (inFlight.size) await Promise.allSettled([...inFlight]);
+      for (const key of [...logs.keys()]) endSubscribers(key);
       sealed = true;
     },
   };
