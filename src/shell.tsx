@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { AppBar, AppBarButton, AppBarMore } from './app-bar'
 import { HistoryPanel } from './history-panel'
 import { RoutineMenu } from './routine-menu'
+import { WorkPanel } from './work-panel'
 
 // The shell for a host that is not React (docs/shell.md): the strip, the routine menu and the
 // History panel, described as plain data and callbacks. Copycat's editor is one: it is plain
@@ -49,12 +50,14 @@ export type ShellProps = {
 	routines?: Omit<ComponentProps<typeof RoutineMenu>, 'container'> | null
 	/** Shown while set: the History panel, fixed under the strip. */
 	history?: Omit<ComponentProps<typeof HistoryPanel>, 'placement'> | null
+	/** Shown while set: the Work panel (docs/dispatch.md), fixed under the strip. */
+	work?: Omit<ComponentProps<typeof WorkPanel>, 'placement'> | null
 	/** Where popovers render (inside the host's shadow root). */
 	container?: HTMLElement | null
 }
 
 export function Shell(props: ShellProps) {
-	const { actions, icons, onAction, routines, history, container } = props
+	const { actions, icons, onAction, routines, history, work, container } = props
 	const buttons = (list: ShellAction[]) =>
 		list.map((a) =>
 			a.kind === 'routines' ? (
@@ -99,6 +102,11 @@ export function Shell(props: ShellProps) {
 			{history && (
 				<div className="pointer-events-auto">
 					<HistoryPanel {...history} placement="page" />
+				</div>
+			)}
+			{work && !history && (
+				<div className="pointer-events-auto">
+					<WorkPanel {...work} placement="page" />
 				</div>
 			)}
 		</>

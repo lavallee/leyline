@@ -40,6 +40,8 @@ The package began as the chat panel only, and its name no longer fits. It stays
 | `./server/threads` | Comment threads, and handing one to an agent. 0.4.0. |
 | `./server/profiles` | Named agents a document can be bound to. 0.4.0. |
 | `./server/worklog` | What agents did: routine statistics, suggestions, and a per-document trail. 0.4.0. |
+| `./server/dispatch` | Work sent from a document to a runner, and what came of it; the runner contract and `leyline-runner-command`, the reference runner. `docs/dispatch.md`. 0.9.0. |
+| `./work-panel` | The Work panel: what a document sent, where it is, Send, Cancel, and the form to send a passage. 0.9.0. |
 
 Each adapter can also be imported alone: `./server/providers/codex-app-server`,
 `./server/providers/cli-oneshot`, `./server/providers/http-chat`, `./server/providers/acp`.

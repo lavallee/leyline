@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.0 (unreleased)
+
+Dispatch: a document can hand work to something that does it elsewhere, and hear back
+(`docs/dispatch.md`).
+
+- **The runner contract**, version 1: a command run once per operation (`submit`,
+  `status`, `cancel`) with JSON on stdin and stdout. Public and small, so anyone can write
+  a runner; Fab's and Daymark's live with them.
+- `./server/dispatch`: `createDispatch({ dir, destinations })`. Items are kept per
+  document; a destination's `approval` (and `agentApproval`, `owner` by default) decides
+  whether an item waits for the owner. A runner that fails or answers outside the contract
+  leaves the item waiting, with what it said.
+- `leyline-runner-command` (`bin/runner-command.mjs`): the reference runner. Each job runs
+  one configured command with the brief on stdin, in the job's root, in the background.
+- `./work-panel`: `WorkPanel`, and `work` on the shell (`./shell`).
+
 ## 0.8.0 (2026-11-24)
 
 The shell: the strip, side panel, routines and history that every one of our tools shows,
