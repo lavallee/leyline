@@ -15,8 +15,8 @@ Every step is separate: a host can stop after any of them. Do step 1 first.
 
 1. From a clean checkout of this repository at the commit to pin: `npm test && npm run check`,
    then `npm pack --pack-destination <host>/vendor`.
-2. In the host: `npm install ./vendor/lyra-forge-agent-chat-0.4.0.tgz`.
-3. Update `vendor/agent-chat.json`: `version`, `artifact`, `integrity` (sha512 of the
+2. In the host: `npm install ./vendor/lyra-forge-leyline-0.4.0.tgz`.
+3. Update `vendor/leyline.json`: `version`, `artifact`, `integrity` (sha512 of the
    tarball, base64), `revision` (this repository's commit), `directory: "."`, and
    `source` once this repository has a home. In `scripts/update-chat-library.js` the
    status check and `npm pack` run on `.` instead of `packages/agent-chat`.

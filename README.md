@@ -1,4 +1,4 @@
-# @lyra-forge/agent-chat
+# Leyline
 
 The working parts of tools where people and coding agents share a document: a chat
 panel, and behind it agent providers, conversations, routines, history, proposals,
@@ -8,7 +8,7 @@ editor). `docs/patterns.md` lists each pattern, where it lives in each tool, and
 and is not in this package.
 
 The package began as the chat panel only, and its name no longer fits. It stays
-`@lyra-forge/agent-chat` until the owner chooses another; see [Name](#name).
+`@lyra-forge/leyline` until the owner chooses another; see [Name](#name).
 
 - ESM only, Node 22 or later.
 - The server modules are plain `.mjs` files with no dependencies. Nothing needs building
@@ -63,10 +63,10 @@ Sharing a transport does not share document access or execution authority.
 ## The UI
 
 ```tsx
-import { ChatHeader, ChatComposer, Conversation } from '@lyra-forge/agent-chat';
-import { ChatDock, DockButtons, useChatLayout } from '@lyra-forge/agent-chat/dock';
-import { ActivityLog } from '@lyra-forge/agent-chat/activity';
-import { Button } from '@lyra-forge/agent-chat/ui/button';
+import { ChatHeader, ChatComposer, Conversation } from '@lyra-forge/leyline';
+import { ChatDock, DockButtons, useChatLayout } from '@lyra-forge/leyline/dock';
+import { ActivityLog } from '@lyra-forge/leyline/activity';
+import { Button } from '@lyra-forge/leyline/ui/button';
 ```
 
 React 19 is a peer dependency. Generate Tailwind utilities from the package source and
@@ -120,7 +120,7 @@ A long-lived agent over the Codex app-server protocol: one child process, one th
 key, activity streamed while it works.
 
 ```js
-import { CodexAppServerProvider, foldActivity } from '@lyra-forge/agent-chat/server/providers';
+import { CodexAppServerProvider, foldActivity } from '@lyra-forge/leyline/server/providers';
 
 const agent = new CodexAppServerProvider({
   command: ['/usr/local/bin/codex', 'app-server'],
@@ -166,7 +166,7 @@ What it does for every host:
 One request, one process, one answer. Nothing is remembered between runs.
 
 ```js
-import { CliOneshotProvider } from '@lyra-forge/agent-chat/server/providers';
+import { CliOneshotProvider } from '@lyra-forge/leyline/server/providers';
 
 const codex = new CliOneshotProvider({ preset: 'codex', bin: '/usr/local/bin/codex' });
 const claude = new CliOneshotProvider({ preset: 'claude', model: 'claude-opus-5-5' });
@@ -200,7 +200,7 @@ A model reached over HTTP. It needs no vendor program on the machine, so it is h
 uses other models: a hosted API, a local server, or a proxy in front of several.
 
 ```js
-import { HttpChatProvider } from '@lyra-forge/agent-chat/server/providers';
+import { HttpChatProvider } from '@lyra-forge/leyline/server/providers';
 
 // OpenAI Chat Completions wire: POST {baseUrl}/chat/completions
 const local = new HttpChatProvider({ baseUrl: 'http://127.0.0.1:11434/v1', model: 'llama3.3' });
@@ -247,7 +247,7 @@ The turn store that Copycat and Skein each wrote. Conversations are keyed by a h
 string. The host supplies `run`; the store does the rest.
 
 ```js
-import { createConversationStore } from '@lyra-forge/agent-chat/server/conversations';
+import { createConversationStore } from '@lyra-forge/leyline/server/conversations';
 
 const store = createConversationStore({
   dir: '/var/lib/myhost/chats',
@@ -300,7 +300,7 @@ session file; the agent runs the host's small CLI, which reads that file and cal
 Host side:
 
 ```js
-import { createCommandEndpoint, writeSession } from '@lyra-forge/agent-chat/server/commands';
+import { createCommandEndpoint, writeSession } from '@lyra-forge/leyline/server/commands';
 
 const commands = createCommandEndpoint({
   port,                                           // the port your http server listens on
@@ -321,7 +321,7 @@ Agent side, in the host's own CLI script:
 
 ```js
 #!/usr/bin/env node
-import { call, readStdin } from '@lyra-forge/agent-chat/server/commands';
+import { call, readStdin } from '@lyra-forge/leyline/server/commands';
 
 const [port, operation] = process.argv.slice(2);
 const data = operation === 'edit' ? JSON.parse(await readStdin()) : {};
@@ -348,7 +348,7 @@ Chores written once and run again. `./server/routines` is the storage (unchanged
 `./server/routine-set` is what the hosts built around it.
 
 ```js
-import { createRoutineSet, headerFormat } from '@lyra-forge/agent-chat/server/routine-set';
+import { createRoutineSet, headerFormat } from '@lyra-forge/leyline/server/routine-set';
 
 const routines = createRoutineSet({
   shipped: [{ name: 'proofread', title: 'Proofread', description: 'Spelling and grammar.', code: 'Proofread the whole page…' }],
@@ -380,7 +380,7 @@ routines.remove('figures');                   // moved to archive/, not deleted;
 The states a document has been in, one whole snapshot at a time.
 
 ```js
-import { createHistory } from '@lyra-forge/agent-chat/server/history';
+import { createHistory } from '@lyra-forge/leyline/server/history';
 
 const history = createHistory({ dir: '/var/lib/myhost/history' });
 
@@ -412,7 +412,7 @@ history.undoRequest('page-42', turn.id, { current: { data: textNow } }); // ever
 A change an agent offers, or makes, to a document people are also editing.
 
 ```js
-import { createProposals } from '@lyra-forge/agent-chat/server/proposals';
+import { createProposals } from '@lyra-forge/leyline/server/proposals';
 
 const proposals = createProposals();          // one built-in kind: find-and-replace on named text files
 let doc = { 'content.md': text };             // the host owns the document
@@ -452,7 +452,7 @@ What people did while an agent worked, so it can be told. (The `./activity` entr
 without `server/`, is the UI's activity transcript: a different thing with an older name.)
 
 ```js
-import { createActivityFeed, describeEvents, formatActivity } from '@lyra-forge/agent-chat/server/activity';
+import { createActivityFeed, describeEvents, formatActivity } from '@lyra-forge/leyline/server/activity';
 
 const feed = createActivityFeed({
   snapshot: doc => currentParts(doc),                     // the host's: the document now, as comparable data
@@ -483,7 +483,7 @@ if (block) { tellTheAgent(block); feed.ack('page-42:main', upto, events); }
 Comment threads attached to part of a document.
 
 ```js
-import { createThreadStore } from '@lyra-forge/agent-chat/server/threads';
+import { createThreadStore } from '@lyra-forge/leyline/server/threads';
 
 const threads = createThreadStore({ dir: '/var/lib/myhost/threads', cleanAnchor: checkMyAnchor });
 
@@ -510,7 +510,7 @@ threads.close('page-42', thread.id, { by: { kind: 'person', name: 'Ada' } });
 Named agents a document can be bound to.
 
 ```js
-import { createProfiles, createBindings, requestFor, providerFor, conversationKey } from '@lyra-forge/agent-chat/server/profiles';
+import { createProfiles, createBindings, requestFor, providerFor, conversationKey } from '@lyra-forge/leyline/server/profiles';
 
 const profiles = createProfiles({ dir: '/var/lib/myhost/profiles' });
 const bindings = createBindings({ file: '/var/lib/myhost/bindings.json' });
@@ -537,7 +537,7 @@ await provider.run(requestFor(profile, { key: conversationKey(lane.id, profile),
 ## Work log and trail
 
 ```js
-import { createWorkLog, routineStats, suggestRoutines, createTrail } from '@lyra-forge/agent-chat/server/worklog';
+import { createWorkLog, routineStats, suggestRoutines, createTrail } from '@lyra-forge/leyline/server/worklog';
 
 const log = createWorkLog({ file: '/var/lib/myhost/work/log.jsonl' });
 log.record({ doc: 'canvas-7', agent: 'Scout', label: 'colour blocked boxes', code, changes: { updated: ids } });
@@ -572,7 +572,7 @@ Nothing is sent anywhere unless the host configures it.
 to the URL you give it. With no URL it returns a function that does nothing.
 
 ```js
-import { createOtlpReporter } from '@lyra-forge/agent-chat/server/telemetry';
+import { createOtlpReporter } from '@lyra-forge/leyline/server/telemetry';
 
 const store = createConversationStore({
   dir, run,
@@ -642,7 +642,7 @@ provenance file in `vendor/`, and install from the tarball. Skein's
 checkout of this repository at the commit you want:
 
 ```sh
-cd /path/to/agent-chat
+cd /path/to/leyline
 git status --porcelain            # must print nothing: pin a commit, not a working tree
 npm test && npm run check
 npm pack --pack-destination /path/to/consumer/vendor
@@ -651,19 +651,19 @@ npm pack --pack-destination /path/to/consumer/vendor
 Then in the consumer:
 
 ```sh
-npm install ./vendor/lyra-forge-agent-chat-0.4.1.tgz
+npm install ./vendor/lyra-forge-leyline-0.4.1.tgz
 ```
 
-and write `vendor/agent-chat.json`:
+and write `vendor/leyline.json`:
 
 ```json
 {
-  "name": "@lyra-forge/agent-chat",
+  "name": "@lyra-forge/leyline",
   "version": "0.4.1",
   "source": "<where this repository lives>",
   "revision": "<git rev-parse HEAD>",
   "directory": ".",
-  "artifact": "lyra-forge-agent-chat-0.4.1.tgz",
+  "artifact": "lyra-forge-leyline-0.4.1.tgz",
   "integrity": "sha512-<base64 sha512 of the tarball>"
 }
 ```
@@ -678,23 +678,16 @@ repack.
 
 ## Name
 
-`@lyra-forge/agent-chat` describes the first thing this package held. A rename touches:
-
-1. `package.json`: `name`. Server code reads the name from there
-   (`server/package-info.mjs`), so the telemetry scope name, the default service name,
-   the temporary-folder prefix and the default Codex client name follow by themselves.
-   Telemetry attribute names follow too: `agent_chat.turn.id` becomes
-   `<new_name>.turn.id`, which anything reading those spans must be told.
-2. `README.md`, `CHANGELOG.md` and `docs/`: the name in prose and in import examples.
-3. Each consumer: the dependency name in its `package.json`, its import specifiers, its
-   `vendor/agent-chat.json` and tarball file name, and its Tailwind source path if it
-   names the package folder.
-4. The repository folder, if it should match.
-
-A test (`test/exports.test.mjs`) fails if any file under `server/`, `src/` or `test/`
-contains the package name, so step 1 stays one edit. The export paths do not contain the
-name and need not change. One path does read oddly beside its neighbour: `./activity` is
-the UI transcript and `./server/activity` is the feed; both are kept for compatibility.
+The package is `@lyra-forge/leyline`. It began as `@lyra-forge/agent-chat` (0.2.3 to
+0.4.1), named for the first thing it held, the chat panel. A ley line is the unseen line
+said to connect separate places; this is the layer running under tools where people and
+agents share a document. The export paths did not change with the rename. Server code
+reads the name from `package.json` (`server/package-info.mjs`), so telemetry attributes
+are now `leyline.turn.id` and so on; anything that read `agent_chat.*` spans must be told.
+A test (`test/exports.test.mjs`) fails if a file under `server/`, `src/` or `test/`
+contains the package name. A consumer moving from the old name changes the dependency
+name in its `package.json`, its import specifiers, its pinned tarball and provenance
+file, and its Tailwind source path if that names the package folder.
 
 ## Moving a host onto the package
 

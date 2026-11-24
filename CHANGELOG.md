@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.0
+
+Renamed from `@lyra-forge/agent-chat` to `@lyra-forge/leyline`. No API or export path changed. Telemetry attribute names follow the package name: `agent_chat.*` is now `leyline.*`.
+
 ## 0.4.1 (2026-11-23)
 
 Found while moving Copycat's server onto the package.
