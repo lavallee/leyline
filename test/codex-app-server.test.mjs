@@ -5,10 +5,10 @@ import { CodexAppServerProvider, commandLine } from '../server/providers/codex-a
 import { ProviderError, foldActivity } from '../server/providers/index.mjs';
 import { fixture, tempDir, readLines, until } from './helpers.mjs';
 
-async function setup(t, options = {}) {
+async function setup(t, { env: extra, ...options } = {}) {
   const dir = await tempDir(t), log = path.join(dir, 'log.jsonl');
   const provider = new CodexAppServerProvider({ command: [process.execPath, fixture('fake-app-server.mjs')], workDir: path.join(dir, 'work'),
-    clientInfo: { name: 'testhost', title: 'Test Host', version: '1.2.3' }, env: { ...process.env, FAKE_LOG: log, OPENAI_API_KEY: 'sk-should-not-pass' }, ...options });
+    clientInfo: { name: 'testhost', title: 'Test Host', version: '1.2.3' }, env: { ...process.env, FAKE_LOG: log, OPENAI_API_KEY: 'sk-should-not-pass', ...extra }, ...options });
   t.after(() => provider.close());
   return { provider, dir, log, received: async method => (await readLines(log)).filter(m => m.method === method) };
 }
@@ -162,6 +162,78 @@ test('a command that cannot start is reported as unavailable, and close() reject
   await assert.rejects(run, { code: 'unavailable' });
   assert.throws(() => new CodexAppServerProvider({ command: [], workDir: dir }), { code: 'config' });
   assert.throws(() => new CodexAppServerProvider({}), { code: 'config' });
+});
+
+test('two runs started together on one key: the second is refused, and only one thread is started', async t => {
+  const { provider, received } = await setup(t);
+  const first = provider.run({ key: 'a', input: 'hang' }), second = provider.run({ key: 'a', input: 'more' });
+  await assert.rejects(second, { code: 'busy' });
+  await until(async () => (await received('turn/start')).length === 1);
+  provider.cancel('a');
+  await assert.rejects(first, { code: 'stopped' });
+  assert.equal((await received('thread/start')).length, 1);
+  assert.equal((await provider.run({ key: 'a', input: 'next' })).message, 'turn 2: next', 'the key is free again afterwards');
+});
+
+test('every way a run can fail before its turn starts is a ProviderError with a code', async t => {
+  // The child dies while the thread is being started.
+  const dying = await setup(t, { env: { FAKE_DIE_ON_THREAD: '1' } });
+  await assert.rejects(dying.provider.run({ key: 'a', input: 'x' }), error => error instanceof ProviderError && error.code === 'unavailable');
+  // close() while the thread is being started.
+  const slow = await setup(t, { env: { FAKE_SLOW_THREAD: '400' } });
+  const run = slow.provider.run({ key: 'a', input: 'x' });
+  await until(async () => (await readLines(slow.log)).some(m => m.method === 'thread/start'));
+  slow.provider.close();
+  await assert.rejects(run, error => error instanceof ProviderError && error.code === 'unavailable');
+  // close() while the child is still starting.
+  const starting = await setup(t, { env: { FAKE_SLOW_INIT: '400' } });
+  const early = starting.provider.run({ key: 'a', input: 'x' });
+  await until(async () => (await readLines(starting.log)).some(m => m.method === 'initialize'));
+  starting.provider.close();
+  await assert.rejects(early, error => error instanceof ProviderError && error.code === 'unavailable');
+});
+
+test('an abort while the agent is still starting stops the run at once', async t => {
+  const { provider } = await setup(t, { env: { FAKE_SLOW_INIT: '1500' } });
+  const controller = new AbortController(), began = Date.now();
+  const run = provider.run({ key: 'a', input: 'x', signal: controller.signal });
+  setTimeout(() => controller.abort(), 30);
+  await assert.rejects(run, { code: 'stopped' });
+  assert.ok(Date.now() - began < 1000, `stopped after ${Date.now() - began} ms`);
+  assert.equal((await provider.run({ key: 'a', input: 'later' })).message, 'turn 1: later', 'the key is free and the agent usable');
+});
+
+test('a stop the agent never acknowledges still ends the run, and the thread is forgotten', async t => {
+  const { provider, received } = await setup(t, { stopGrace: 120 });
+  const run = provider.run({ key: 'a', input: 'deaf', timeout: 60000 });
+  await until(async () => (await received('turn/start')).length === 1);
+  const began = Date.now();
+  provider.cancel('a');
+  await assert.rejects(run, { code: 'stopped' });
+  assert.ok(Date.now() - began < 2000);
+  assert.equal((await provider.run({ key: 'a', input: 'next' })).message, 'turn 1: next', 'a thread in an unknown state is not reused');
+});
+
+test('notifications that are not in the expected form are skipped; the run still finishes', async t => {
+  const { provider } = await setup(t);
+  const items = [];
+  const result = await provider.run({ key: 'a', input: 'garbage in', onEvent: event => foldActivity(items, event) });
+  assert.equal(result.message, 'turn 1: garbage in');
+  assert.deepEqual(items.find(a => a.id === 'g1').paths, ['/work/ok.md']);
+  assert.equal(items.find(a => a.id === 'g3').text, 'kept');
+  assert.equal(typeof items.find(a => a.id === 'g2').command, 'string');
+});
+
+test('an approval may be answered asynchronously; a callback that throws or rejects declines', async t => {
+  const answer = async file => (await readLines(file)).find(m => m.id >= 9000 && m.result);
+  const later = await setup(t, { onApproval: async () => { await new Promise(r => setTimeout(r, 10)); return { decision: 'accept' }; } });
+  await later.provider.run({ key: 'a', input: 'approve this' });
+  await until(() => answer(later.log));
+  assert.deepEqual((await answer(later.log)).result, { decision: 'accept' });
+  const broken = await setup(t, { onApproval: async () => { throw new Error('no'); }, onStderr: () => { throw new Error('stderr handler broke'); } });
+  await broken.provider.run({ key: 'a', input: 'approve this' });
+  await until(() => answer(broken.log));
+  assert.deepEqual((await answer(broken.log)).result, { decision: 'decline' });
 });
 
 test('commandLine strips the shell wrapper', () => {

@@ -16,11 +16,15 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   const message = JSON.parse(line); log(message);
   const { id, method, params } = message;
   if (method === undefined) return;                       // a reply to one of our requests
-  if (method === 'initialize') return send({ id, result: {} });
+  if (method === 'initialize') return setTimeout(() => send({ id, result: {} }), Number(process.env.FAKE_SLOW_INIT || 0));
   if (method === 'initialized') return;
   if (method === 'config/read') return send({ id, result: { config: { mcp_servers: { notes: {}, mail: {} }, plugins: { helper: {} } } } });
   if (method === 'model/list') return send({ id, result: { data: [{ id: 'other' }, { id: 'fake-model', isDefault: true }] } });
-  if (method === 'thread/start') { const thread = `t${++seq}`; threads.set(thread, { turns: 0, total: 0 }); return send({ id, result: { thread: { id: thread } } }); }
+  if (method === 'thread/start') {
+    if (process.env.FAKE_DIE_ON_THREAD) return process.exit(1);
+    const thread = `t${++seq}`; threads.set(thread, { turns: 0, total: 0 });
+    return setTimeout(() => send({ id, result: { thread: { id: thread } } }), Number(process.env.FAKE_SLOW_THREAD || 0));
+  }
   if (method === 'turn/interrupt') {
     send({ id, result: {} });
     if (hanging.get(params.threadId) === params.turnId) { hanging.delete(params.threadId); note('turn/completed', { threadId: params.threadId, turn: { id: params.turnId, status: 'interrupted' } }); }
@@ -33,6 +37,19 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     send({ id, result: { turn: { id: turnId } } });
     note('turn/started', { threadId, turn: { id: turnId } });
     if (text.includes('hang')) return hanging.set(threadId, turnId);
+    if (text.includes('deaf')) return;                      // never finishes, and an interrupt changes nothing
+    if (text.includes('garbage')) {
+      process.stdout.write('null\n[]\n"text"\n');
+      send({ method: 'item/completed', params: null });
+      send({ method: 'item/completed' });
+      note('item/completed', { threadId, item: null });
+      note('item/completed', { threadId, item: { id: 'g1', type: 'fileChange', changes: [null, 7, { path: '/work/ok.md' }] } });
+      note('item/completed', { threadId, item: { id: 'g2', type: 'commandExecution', command: { not: 'a command' }, aggregatedOutput: { not: 'text' } } });
+      note('item/completed', { threadId, item: { id: 'g3', type: 'reasoning', summary: [null, 5, { text: 'kept' }] } });
+      note('item/reasoning/summaryTextDelta', { threadId, itemId: 'g4', summaryIndex: 0, delta: { not: 'text' } });
+      note('thread/tokenUsage/updated', { threadId, tokenUsage: { total: 'many' } });
+      note('turn/started', { threadId, turn: null });
+    }
     if (text.includes('die')) return process.exit(1);
     if (text.includes('fail')) return note('error', { threadId, willRetry: false, error: { message: 'The model is unavailable.' } });
     if (text.includes('approve')) send({ id: 9000 + seq, method: 'item/commandExecution/requestApproval', params: { threadId, command: 'rm -rf /' } });
