@@ -59,6 +59,17 @@ test('the ACP provider is its own entry point and is in the providers index', as
   assert.equal(index.diffToEdit, alone.diffToEdit);
 });
 
+test('0.7.0 adds the event reducer, the stream helper and the browser client', async () => {
+  for (const [subpath, target] of Object.entries({ './server/events': './server/events.mjs', './server/stream': './server/stream.mjs', './stream-client': './src/stream-client.mjs' })) assert.equal(pkg.exports[subpath], target);
+  assert.equal(typeof (await import(`${pkg.name}/server/events`)).applyEvent, 'function');
+  assert.equal(typeof (await import(`${pkg.name}/server/stream`)).streamConversation, 'function');
+  assert.equal(typeof (await import(`${pkg.name}/stream-client`)).followConversation, 'function');
+  const store = await import(`${pkg.name}/server/conversations`);
+  for (const name of ['createConversationStore', 'readConversation', 'fileNameFor', 'logNameFor', 'ConversationError', 'TURN_STATUSES']) assert.ok(store[name], name);
+  // The browser client and the reducer it shares with the server use nothing a browser lacks.
+  for (const file of ['src/stream-client.mjs', 'server/events.mjs']) assert.ok(!/from\s+['"]node:/.test(await readFile(path.join(root, file), 'utf8')), `${file} imports no Node module`);
+});
+
 test('a rename is one step: only package.json, the README, the changelog and docs name the package', async () => {
   const short = pkg.name.replace(/^@[^/]+\//, ''), scope = pkg.name.split('/')[0];
   const walk = async dir => (await Promise.all((await readdir(path.join(root, dir), { withFileTypes: true })).map(e => e.isDirectory() ? walk(`${dir}/${e.name}`) : [`${dir}/${e.name}`]))).flat();
