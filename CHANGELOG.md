@@ -108,6 +108,27 @@ Faster, measured (`bench/RESULTS.md`): the activity feed with many events kept, 
 of sends to one conversation, one large server-sent event in small chunks, listing and
 reading history, and the proposal check on awkward text. Not faster: one write of a
 large conversation, and saving a history version.
+### Also in 0.6.0: an Agent Client Protocol provider
+
+Added:
+
+- `./server/providers/acp`: `AcpProvider`, a client for the Agent Client Protocol
+  (protocol version 1), so a host can drive any ACP agent (Gemini CLI, OpenCode, Goose and
+  others) through the provider contract. Keyed sessions with `session/load` and
+  `session/resume`; `session/update` mapped to streamed text, reasoning, tool-call and
+  plan activity; `fs/read_text_file` and `fs/write_text_file` served by host hooks
+  (reads only inside configured roots and writes refused by default); permission requests
+  answered by a hook that may wait for a person, refused by default; terminals only with
+  host hooks; MCP servers passed through; cancel, overall and idle timeouts, reset; an
+  `auth` error naming the agent's sign-in methods. Also exported from `./server/providers`.
+- `diffToEdit`: an ACP diff as a `./server/proposals` text edit, or why it is not one.
+- `server/jsonrpc-stdio.mjs`: the JSON-RPC 2.0 stdio transport the adapter uses (not an
+  entry point). `./server/rpc` (`CodexRpc`) is unchanged.
+- `scripts/acp-real-agent.mjs`: one small real session per installed agent; not part of
+  `npm test`. Run on 2026-11-24: OpenCode 2.2.5 and Goose 1.33.1 replied; Gemini CLI
+  0.66.0 was not signed in and gave the `auth` error.
+
+Unchanged: every 0.5.0 export path and signature, the contract, and the other adapters.
 
 ## 0.5.0
 
