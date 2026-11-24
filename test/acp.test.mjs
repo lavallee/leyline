@@ -215,12 +215,12 @@ test('a permission request waits for an async hook, and is refused by default', 
   const asked = deferred(), decision = deferred();
   const { provider, answers } = await setup(t, { onPermission: request => { asked.resolve(request); return decision.promise; } });
   const events = [];
-  const run = provider.run({ key: 'a', input: 'permission edit /work/a.md', onEvent: e => events.push(e), idleTimeout: 80 });
-  const request = await asked.promise;
+  const run = provider.run({ key: 'a', input: 'permission edit /work/a.md', onEvent: e => events.push(e), idleTimeout: 300 });
+  const request = await asked.promise, since = Date.now();
   assert.deepEqual(request.options.map(o => o.optionId), ['yes-always', 'yes', 'no']);
   assert.deepEqual([request.key, request.toolCall.toolCallId, request.toolCall.kind, request.toolCall.title], ['a', 'p1', 'edit', 'Touching /work/a.md']);
   assert.deepEqual(request.diffs, [{ type: 'diff', path: '/work/a.md', oldText: 'one\n', newText: 'two\n' }]);
-  await new Promise(r => setTimeout(r, 200));
+  await until(() => Date.now() - since > 900);                // three idle limits pass with the agent silent
   assert.equal((await answers()).length, 0, 'nothing is answered, and the idle clock does not run, while a person decides');
   decision.resolve('allow_once');
   assert.equal((await run).message, 'permission: {"outcome":{"outcome":"selected","optionId":"yes"}}');
