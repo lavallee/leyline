@@ -12,18 +12,24 @@ const MIN_W = 280, MIN_H = 180, EDGE = 64
 
 const DOCK_NAMES = ['right', 'left', 'bottom', 'float']
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(n, Math.max(lo, hi)))
-function load(key = KEY): Layout {
+function load(key = KEY, initial: Layout = DEFAULT): Layout {
 	try {
 		const saved = JSON.parse(localStorage.getItem(key) ?? 'null')
-		return saved?.float && DOCK_NAMES.includes(saved.dock) ? { ...DEFAULT, ...saved } : DEFAULT
+		return saved?.float && DOCK_NAMES.includes(saved.dock) ? { ...initial, ...saved } : initial
 	} catch {
-		return DEFAULT
+		return initial
 	}
 }
 
-/** Where the chat panel sits, kept per browser. On a narrow screen it is always along the bottom. */
-export function useChatLayout(key = KEY) {
-	const [layout, set] = useState(() => load(key))
+/**
+ * Where the chat panel sits, kept per browser. On a narrow screen it is always along the bottom.
+ * `initial` is the host's default until a person moves it (Copycat floats it over the page).
+ */
+export function useChatLayout(key = KEY, initial?: Partial<Layout> | (() => Partial<Layout>)) {
+	const [layout, set] = useState(() => {
+		const given = typeof initial === 'function' ? initial() : initial
+		return load(key, given ? { ...DEFAULT, ...given, float: { ...DEFAULT.float, ...given.float } } : DEFAULT)
+	})
 	const [narrow, setNarrow] = useState(() => matchMedia('(max-width: 767px)').matches)
 	useEffect(() => {
 		const m = matchMedia('(max-width: 767px)')

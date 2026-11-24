@@ -16,6 +16,10 @@ moved here so none of them keeps its own copy (`docs/shell.md`).
   running routine on the trigger, and "From your work" suggestions. `onAskAgent` may now
   be passed the text to draft. Existing props are unchanged; the trigger is an
   `AppBarButton`, and `container` defaults to the strip's.
+- `./shell`: `Shell` and `mountShell`, the strip with its routine menu and History panel
+  described as plain data, for a host that is not React (Copycat's editor).
+- `./dock`: `useChatLayout(key, initial)` takes the host's default layout (Copycat floats
+  the chat). A layout a person chose is kept as before.
 
 ## 0.7.0 (2026-11-24)
 

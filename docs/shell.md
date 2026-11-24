@@ -14,7 +14,7 @@ The package is opinionated at the top and plain underneath. A host can stop at a
 | Server | Stores and the agent's plumbing, no UI | `./server/*` |
 | Primitives | Buttons, inputs, popovers, message bubbles | `./ui/*`, `./theme.css` |
 | Components | The strip, the side panel, routines, history, the chat and its dock | `./app-bar`, `./side-panel`, `./routine-menu`, `./history-panel`, `.`, `./dock` |
-| Shell | All of the above put together for a page that is not React | `./shell` (`mountShell`) |
+| Shell | The strip, routines and history described as plain data, for a page that is not React | `./shell` (`Shell`, `mountShell`) |
 
 A component takes the host's data and actions as props (`loadVersions`, `runRoutine` and
 so on) and never fetches a URL of its own. That is what lets Toucan's canvas and

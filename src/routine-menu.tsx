@@ -48,7 +48,8 @@ export function RoutineMenu({ engine, onAskAgent, loadRoutines, runRoutine, save
 	/** A routine the host is running on its own (from a slash command, say): shown on the trigger. */
 	running?: string
 }) {
-	const container = given ?? useAppBarContainer()
+	const fromBar = useAppBarContainer()
+	const container = given ?? fromBar
 	const [open, setOpen] = useState(false)
 	const [routines, setRoutines] = useState<Routine[] | null>(null)
 	const [kinds, setKinds] = useState<RoutineKind[]>([])

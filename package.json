@@ -26,6 +26,7 @@
     "./app-bar": "./src/app-bar.tsx",
     "./side-panel": "./src/side-panel.tsx",
     "./history-panel": "./src/history-panel.tsx",
+    "./shell": "./src/shell.tsx",
     "./server/providers": "./server/providers/index.mjs",
     "./server/providers/codex-app-server": "./server/providers/codex-app-server.mjs",
     "./server/providers/cli-oneshot": "./server/providers/cli-oneshot.mjs",
