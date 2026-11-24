@@ -105,6 +105,11 @@ groups by the `kinds` its `loadRoutines` returns, searches past six routines, an
 `loadSuggestions` (what `./server/worklog` noticed) for banking. A host inside a shadow
 root passes `container` to `AppBar`; popovers opened from the strip render there.
 
+A page that is not React uses `./shell`: `mountShell(node, props)` draws the strip, the
+routine menu and the History panel from plain data (`actions` as `{ id, label, icon, count,
+pressed, … }`, `onAction(id)`, `routines`, `history`) and returns `update` and `unmount`.
+Copycat's editor works this way.
+
 ## Providers
 
 A provider turns one request into one reply, and may report what it is doing on the way.
