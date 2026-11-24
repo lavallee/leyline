@@ -143,3 +143,31 @@ test('the feed is bounded, notes are events, and readers can be forgotten by pre
   bare.changed('d', [{ id: 'x', change: 'added' }]);
   assert.equal(bare.pending('r', 'd').events.length, 1);
 });
+
+// ---------------------------------------------------------------- hardening
+
+test('a reader is told exactly what is new, with many events kept and many dropped', () => {
+  for (const keep of [5, 50, 1000]) {
+    const feed = createActivityFeed({ keep });
+    feed.pending('early', 'doc'); feed.pending('late', 'doc');
+    const told = { early: [], late: [] };
+    for (let i = 1; i <= 400; i++) {
+      feed.changed('doc', [{ id: `p${i}`, change: 'updated' }]);
+      if (i % 3 === 0) { const { events, upto } = feed.pending('early', 'doc'); told.early.push(...events.map(e => e.id)); feed.ack('early', upto, events); }
+    }
+    assert.deepEqual(told.early, Array.from({ length: 399 }, (_, i) => `p${i + 1}`), `keep ${keep}: nothing missed or repeated while it keeps up`);
+    const { events } = feed.pending('late', 'doc');
+    assert.deepEqual(events.map(e => e.id), Array.from({ length: Math.min(keep, 400) }, (_, i) => `p${400 - Math.min(keep, 400) + i + 1}`), `keep ${keep}: a slow reader gets the newest that are kept`);
+  }
+});
+
+test('drop() forgets a document and its readers, so a long-lived host does not keep every one it ever opened', () => {
+  const { feed } = setup();
+  feed.open('page'); feed.pending('chat:page', 'page'); feed.pending('other', 'elsewhere');
+  feed.note('page', { text: 'hello' }); feed.selected('page', 'view-1', 'Ada', ['p1']);
+  assert.deepEqual(feed.size(), { docs: 1, readers: 2, events: 2 });
+  feed.drop('page');
+  assert.deepEqual(feed.size(), { docs: 0, readers: 1, events: 0 });
+  assert.deepEqual(feed.selections('page'), []);
+  assert.equal(feed.pending('chat:page', 'page').fresh, true, 'a reader that comes back starts at the present');
+});

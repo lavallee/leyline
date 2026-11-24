@@ -34,13 +34,16 @@ export function createActivityFeed({ snapshot, diff, busy = () => false, quietMs
   let seq = 0;
 
   const stateOf = doc => {
-    if (!docs.has(doc)) docs.set(doc, { base: null, timer: null, since: 0, events: [], claims: new Map(), selections: new Map() });
+    if (!docs.has(doc)) docs.set(doc, { base: null, timer: null, since: 0, events: [], head: 0, claims: new Map(), selections: new Map() });
     return docs.get(doc);
   };
   function push(doc, event) {
     const st = stateOf(doc), entry = { seq: ++seq, t: now(), ...event };
     st.events.push(entry);
-    if (st.events.length > keep) st.events.splice(0, st.events.length - keep);
+    // The oldest are dropped by moving a mark, and the list itself is cut back only now
+    // and then, so keeping many events does not make each new one cost more.
+    if (st.events.length - st.head > keep) st.head = st.events.length - keep;
+    if (st.head > 64 && st.head >= st.events.length / 2) { st.events = st.events.slice(st.head); st.head = 0; }
     return entry;
   }
   // Whoever claimed a part recently did this; otherwise a person did.
@@ -81,6 +84,7 @@ export function createActivityFeed({ snapshot, diff, busy = () => false, quietMs
    */
   function claim(doc, actor, ids) {
     const st = stateOf(doc), t = now();
+    expire(st);
     for (const id of ids ?? []) if (id !== undefined && id !== null) st.claims.set(id, { actor, t });
   }
 
@@ -137,7 +141,11 @@ export function createActivityFeed({ snapshot, diff, busy = () => false, quietMs
     if (fresh) return { events: [], upto: r.seq, fresh: true, seen: r.seen };
     const st = docs.get(doc);
     if (st?.base) { clearTimeout(st.timer); st.timer = null; settle(doc); }
-    const events = (st?.events ?? []).filter(e => e.seq > r.seq && e.actor?.kind !== 'system' && !mine(e.actor) && !skip(e));
+    // Events are in order of seq, so the reader's place is found by halving, not by reading every one kept.
+    const all = st?.events ?? [], events = [];
+    let low = st?.head ?? 0, high = all.length;
+    while (low < high) { const mid = (low + high) >> 1; if (all[mid].seq > r.seq) high = mid; else low = mid + 1; }
+    for (let i = low; i < all.length; i++) { const e = all[i]; if (e.actor?.kind !== 'system' && !mine(e.actor) && !skip(e)) events.push(e); }
     return { events, upto: seq, fresh: false, seen: r.seen };
   }
 
@@ -151,7 +159,17 @@ export function createActivityFeed({ snapshot, diff, busy = () => false, quietMs
   /** Forgets a reader, and every reader whose key starts with it and a `#`, `:` or `@`. */
   function forget(prefix) { for (const k of [...readers.keys()]) if (k === prefix || ['#', ':', '@'].some(sep => k.startsWith(prefix + sep))) readers.delete(k); }
 
-  return { open, close, touched, claim, settle, changed, note, selected, left, selections, pending, ack, forget, get seq() { return seq; } };
+  /** Forgets a document altogether: its events, claims, selections and every reader of it. For a document the host has finished with. */
+  function drop(doc) {
+    const st = docs.get(doc);
+    if (st) { clearTimeout(st.timer); docs.delete(doc); }
+    for (const [key, r] of readers) if (r.doc === doc) readers.delete(key);
+  }
+
+  /** How much is held: documents, readers and events. Nothing is dropped unless the host says so (close, drop, forget) or `keep` is passed. */
+  const size = () => ({ docs: docs.size, readers: readers.size, events: [...docs.values()].reduce((sum, st) => sum + st.events.length - st.head, 0) });
+
+  return { open, close, touched, claim, settle, changed, note, selected, left, selections, pending, ack, forget, drop, size, get seq() { return seq; } };
 }
 
 /**
