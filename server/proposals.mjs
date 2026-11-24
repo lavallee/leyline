@@ -55,8 +55,7 @@ export function occurrences(body, needle, limit = 2) {
   }
   return found;
 }
-// The place the last check found, so that applying the edit it allowed does not search again.
-let located = null;
+
 
 /**
  * The built-in kind: replace `find` with `replace` in `file`. The document is a map of
@@ -76,13 +75,11 @@ export const textEdit = {
     const places = edit.find ? occurrences(body, edit.find) : [];
     if (!places.length) return { code: 'not-found', problem: 'The text to replace is not in the document.' };
     if (places.length > 1) return { code: 'ambiguous', problem: 'The text to replace occurs more than once.' };
-    located = { body, find: edit.find, at: places[0] };
     return null;
   },
   apply(edit, doc) {
     const body = doc[edit.file];
-    const at = located && located.body === body && located.find === edit.find ? located.at : occurrences(body, edit.find, 1)[0];
-    located = null;
+    const at = occurrences(body, edit.find, 1)[0];
     return { ...doc, [edit.file]: body.slice(0, at) + edit.replace + body.slice(at + edit.find.length) };
   },
   invert: edit => ({ ...edit, find: edit.replace, replace: edit.find }),
