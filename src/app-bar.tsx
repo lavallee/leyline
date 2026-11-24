@@ -98,7 +98,7 @@ export function AppBarButton({ icon: Icon, label, pressed, count, attention, col
 			</Button>
 		)
 	return (
-		<Button variant={variant} size="sm" aria-pressed={rest["aria-expanded"] === undefined ? pressed : undefined} aria-label={count ? `${label}, ${count}` : label} title={title ?? label} className={cn('relative', variant === 'outline' && 'ml-1', pressed && variant === 'ghost' && 'bg-muted', collapse && 'max-sm:hidden', className)} {...rest}>
+		<Button data-attention={attention || undefined} variant={variant} size="sm" aria-pressed={rest["aria-expanded"] === undefined ? pressed : undefined} aria-label={count ? `${label}, ${count}` : label} title={title ?? label} className={cn('relative', variant === 'outline' && 'ml-1', pressed && variant === 'ghost' && 'bg-muted', collapse && 'max-sm:hidden', className)} {...rest}>
 			{Icon && <Icon />}
 			<span className={cn(Icon && 'max-lg:hidden')}>{label}</span>
 			{badge}
