@@ -69,7 +69,7 @@ export function foldActivity(items, event, { max = 200, maxText = 20000, describ
   if (event.append) item.text = (item.text + event.append).slice(-maxText);
   if (event.text !== undefined) item.text = String(event.text).slice(-maxText);
   if (event.command !== undefined) item.command = String(event.command).slice(0, 4000);
-  if (event.paths) item.paths = event.paths.map(String).slice(0, 200);
+  if (Array.isArray(event.paths)) item.paths = event.paths.slice(0, 200).map(String);
   if (event.title) item.title = String(event.title).slice(0, 160);
   if (event.status && ACTIVITY_STATUSES.includes(event.status)) item.status = event.status;
   const extra = describe?.(event, item);
