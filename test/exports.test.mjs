@@ -59,8 +59,12 @@ test('the ACP provider is its own entry point and is in the providers index', as
   assert.equal(index.diffToEdit, alone.diffToEdit);
 });
 
-test('0.7.0 adds the event reducer, the stream helper and the browser client', async () => {
-  for (const [subpath, target] of Object.entries({ './server/events': './server/events.mjs', './server/stream': './server/stream.mjs', './stream-client': './src/stream-client.mjs' })) assert.equal(pkg.exports[subpath], target);
+test('0.7.0 adds the event reducer, the stream helper, the browser client and the MCP server', async () => {
+  for (const [subpath, target] of Object.entries({ './server/events': './server/events.mjs', './server/stream': './server/stream.mjs', './stream-client': './src/stream-client.mjs', './server/mcp': './server/mcp.mjs' })) assert.equal(pkg.exports[subpath], target);
+  const mcp = await import(`${pkg.name}/server/mcp`);
+  for (const name of ['createMcpServer', 'serveMcp', 'serveMcpBridge', 'describeTools']) assert.equal(typeof mcp[name], 'function', name);
+  const providers = await import(`${pkg.name}/server/providers`);
+  for (const name of ['createBatcher', 'chosenOption']) assert.equal(typeof providers[name], 'function', name);
   assert.equal(typeof (await import(`${pkg.name}/server/events`)).applyEvent, 'function');
   assert.equal(typeof (await import(`${pkg.name}/server/stream`)).streamConversation, 'function');
   assert.equal(typeof (await import(`${pkg.name}/stream-client`)).followConversation, 'function');
@@ -101,7 +105,7 @@ test('server modules import only Node built-ins and each other', async () => {
   }
 });
 
-test('the package is 0.6.0, MIT, for Node 22 or later', async () => {
-  assert.equal(pkg.version, '0.6.0'); assert.equal(pkg.license, 'MIT'); assert.equal(pkg.engines.node, '>=22'); assert.equal(pkg.type, 'module');
+test('the package is 0.7.0, MIT, for Node 22 or later', async () => {
+  assert.equal(pkg.version, '0.7.0'); assert.equal(pkg.license, 'MIT'); assert.equal(pkg.engines.node, '>=22'); assert.equal(pkg.type, 'module');
   assert.match(await readFile(path.join(root, 'LICENSE'), 'utf8'), /MIT License/);
 });
