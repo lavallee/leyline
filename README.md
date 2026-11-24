@@ -78,6 +78,38 @@ React 19 is a peer dependency. Generate Tailwind utilities from the package sour
 supply your theme tokens (see `src/theme.css`). Hosts clear the draft after accepting a
 send. The components and their props are the same as in 0.2.3.
 
+### The shell: one strip, one set of panels
+
+The package is opinionated at the top and plain underneath: our own tools (Toucan,
+Copycat, Skein) use these components rather than keeping their own copies, so they look
+and behave alike. `docs/shell.md` has the conventions and the levels a host can stop at.
+
+```tsx
+import { AppBar, AppBarButton, AppBarMore } from '@lyra-forge/leyline/app-bar';
+import { SidePanel, PanelNotice, PanelError } from '@lyra-forge/leyline/side-panel';
+import { HistoryPanel } from '@lyra-forge/leyline/history-panel';
+import { RoutineMenu } from '@lyra-forge/leyline/routine-menu';
+
+<AppBar product="toucan" productHref="/" title={title} live={synced}>
+  <AppBarButton icon={HistoryIcon} label="History" pressed={historyOpen} onClick={toggleHistory} />
+  <RoutineMenu engine="tldraw" loadRoutines={…} runRoutine={…} saveRoutine={…} removeRoutine={…} onAskAgent={ask} />
+  <AppBarButton icon={MessageSquareIcon} label="Chat" variant="outline" pressed={chatOpen} onClick={toggleChat} />
+</AppBar>
+```
+
+Components take the host's data and actions as props and never fetch a URL themselves.
+`HistoryPanel` lists what `./server/history` keeps; the host passes `loadVersions`,
+`readVersion`, `restoreVersion` and, optionally, `saveVersion`, and shows a version
+either with `Preview` (drawn over its stage) or itself from `onPreview`. `RoutineMenu`
+groups by the `kinds` its `loadRoutines` returns, searches past six routines, and offers
+`loadSuggestions` (what `./server/worklog` noticed) for banking. A host inside a shadow
+root passes `container` to `AppBar`; popovers opened from the strip render there.
+
+A page that is not React uses `./shell`: `mountShell(node, props)` draws the strip, the
+routine menu and the History panel from plain data (`actions` as `{ id, label, icon, count,
+pressed, … }`, `onAction(id)`, `routines`, `history`) and returns `update` and `unmount`.
+Copycat's editor works this way.
+
 ## Providers
 
 A provider turns one request into one reply, and may report what it is doing on the way.

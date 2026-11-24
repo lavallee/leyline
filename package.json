@@ -1,6 +1,6 @@
 {
   "name": "@lyra-forge/leyline",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "The working parts of tools where people and coding agents share a document: a chat panel, agent providers, conversations, routines, history, proposals, activity, threads and profiles.",
   "type": "module",
   "license": "MIT",
@@ -23,6 +23,10 @@
     "./server/routines": "./server/routine-bank.mjs",
     "./routines": "./src/routines.mjs",
     "./routine-menu": "./src/routine-menu.tsx",
+    "./app-bar": "./src/app-bar.tsx",
+    "./side-panel": "./src/side-panel.tsx",
+    "./history-panel": "./src/history-panel.tsx",
+    "./shell": "./src/shell.tsx",
     "./server/providers": "./server/providers/index.mjs",
     "./server/providers/codex-app-server": "./server/providers/codex-app-server.mjs",
     "./server/providers/cli-oneshot": "./server/providers/cli-oneshot.mjs",
