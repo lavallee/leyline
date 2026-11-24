@@ -67,12 +67,13 @@ export const useAppBarContainer = () => useContext(ContainerContext)
 
 /**
  * One action in the strip: an icon and a label that hides below 1024px. `pressed` is for a
- * panel the action toggles; `count` is a number shown after the label (open comments,
- * unsaved edits); `attention` is a dot asking for a look (the agent is waiting).
- * `variant="outline"` is for the chat toggle, which comes last; `variant="default"` for the
- * one action the page is for (Review, Publish). `collapse` moves it into AppBarMore on a phone.
+ * panel the action toggles; `count` is a number in a pill after the label (open threads,
+ * unsaved edits), amber when `attention` is set (something is waiting on this person);
+ * `attention` with no count is an amber dot. `variant="outline"` is for the chat toggle,
+ * which comes last; `variant="default"` for the one action the page is for (Review).
+ * `collapse` moves it into AppBarMore on a phone.
  */
-export function AppBarButton({ icon: Icon, label, pressed, count, attention, collapse, variant = 'ghost', className, title, ...rest }: Omit<ComponentProps<typeof Button>, 'children' | 'size'> & {
+export function AppBarButton({ icon: Icon, label, pressed, count, attention, collapse, variant = 'ghost', className, title, children, ...rest }: Omit<ComponentProps<typeof Button>, 'size'> & {
 	icon?: Icon
 	label: string
 	pressed?: boolean
@@ -82,26 +83,26 @@ export function AppBarButton({ icon: Icon, label, pressed, count, attention, col
 }) {
 	const inMore = useContext(InMore)
 	if (inMore && !collapse) return null
-	const shown = `${label}${count ? ` · ${count}` : ''}`
+	const badge = count ? (
+		<span className={cn('rounded-full px-1.5 text-[11px] font-semibold tabular-nums', attention ? 'bg-amber-400 text-amber-950' : variant === 'default' ? 'bg-primary-foreground/20' : 'bg-muted text-muted-foreground')}>{count}</span>
+	) : attention ? (
+		<span aria-hidden className={cn('size-1.5 rounded-full bg-amber-500', !inMore && 'absolute top-0.5 right-0.5')} />
+	) : null
 	if (inMore)
 		return (
-			<Button variant="ghost" size="sm" className={cn('relative w-full justify-start', pressed && 'bg-muted', className)} aria-pressed={pressed} title={title ?? label} {...rest}>
+			<Button variant="ghost" size="sm" className={cn('w-full justify-start', pressed && 'bg-muted', className)} aria-pressed={rest["aria-expanded"] === undefined ? pressed : undefined} title={title ?? label} {...rest}>
 				{Icon && <Icon />}
-				<span>{shown}</span>
-				{attention && <span aria-hidden className="ml-auto size-1.5 rounded-full bg-amber-500" />}
+				<span className="flex-1 text-left">{label}</span>
+				{badge}
+				{children}
 			</Button>
 		)
 	return (
-		<Button variant={variant} size="sm" aria-pressed={pressed} aria-label={rest['aria-label'] ?? shown} title={title ?? label} className={cn('relative', variant === 'outline' && 'ml-1', pressed && variant !== 'default' && 'bg-muted', collapse && 'max-sm:hidden', className)} {...rest}>
+		<Button variant={variant} size="sm" aria-pressed={rest["aria-expanded"] === undefined ? pressed : undefined} aria-label={count ? `${label}, ${count}` : label} title={title ?? label} className={cn('relative', variant === 'outline' && 'ml-1', pressed && variant === 'ghost' && 'bg-muted', collapse && 'max-sm:hidden', className)} {...rest}>
 			{Icon && <Icon />}
 			<span className={cn(Icon && 'max-lg:hidden')}>{label}</span>
-			{count ? <span className={cn('tabular-nums', Icon && 'max-lg:hidden')}>· {count}</span> : null}
-			{count && Icon ? (
-				<span aria-hidden className="tabular-nums text-[10px] lg:hidden">
-					{count}
-				</span>
-			) : null}
-			{attention && <span aria-hidden className="absolute top-0.5 right-0.5 size-1.5 rounded-full bg-amber-500" />}
+			{badge}
+			{children}
 		</Button>
 	)
 }
