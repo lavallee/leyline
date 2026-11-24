@@ -35,6 +35,13 @@
 // - it never signs in for a person. An agent that wants authentication gets a
 //   ProviderError with code 'auth' that names the methods the agent offered.
 //
+// What the protocol does not have: steering. Version 1 gives a client one thing to send
+// while a prompt turn is running, `session/cancel` ("Clients MAY cancel an ongoing prompt
+// turn at any time", protocol/v1/prompt-turn, read again on 2026-11-24 with the schema's
+// list of client methods); there is no way to add input to a running turn, so
+// `capabilities.steer` is false and this adapter has no steer(). A host sends the input as
+// the next request.
+//
 // What it cannot do: confine the agent. An ACP agent runs its own tools in its own
 // process, with the access of the user who started it. The hooks decide what the agent
 // gets *through the client* (the live draft, a write turned into a proposal); the
@@ -125,7 +132,7 @@ export function sliceLines(content, line, limit) {
 
 export class AcpProvider {
   name = 'acp';
-  capabilities = { activity: true, textStream: true, sessions: true, cancel: true, shell: true, structuredOutput: false, asks: true };
+  capabilities = { activity: true, textStream: true, sessions: true, cancel: true, shell: true, structuredOutput: false, asks: true, steer: false };
 
   /**
    * @param {object} options

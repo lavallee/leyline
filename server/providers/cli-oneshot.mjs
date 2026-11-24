@@ -120,7 +120,7 @@ export const PRESETS = {
 
 export class CliOneshotProvider {
   name = 'cli-oneshot';
-  capabilities = { activity: false, textStream: false, sessions: false, cancel: true, shell: false, structuredOutput: true, asks: false };
+  capabilities = { activity: false, textStream: false, sessions: false, cancel: true, shell: false, structuredOutput: true, asks: false, steer: false };
 
   /**
    * @param {object} config

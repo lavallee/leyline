@@ -76,7 +76,7 @@ export const commandLine = command => (Array.isArray(command) ? command.join(' '
 
 export class CodexAppServerProvider {
   name = 'codex-app-server';
-  capabilities = { activity: true, textStream: true, sessions: true, cancel: true, shell: true, structuredOutput: true, asks: true };
+  capabilities = { activity: true, textStream: true, sessions: true, cancel: true, shell: true, structuredOutput: true, asks: true, steer: true };
 
   /**
    * @param {object} options
@@ -115,6 +115,7 @@ export class CodexAppServerProvider {
     this.threads = new Map();   // host key -> Codex thread id
     this.pending = new Map();   // Codex thread id -> the run in flight
     this.starting = new Set();  // host keys whose run has not reached its turn yet
+    this.arriving = new Map();  // host key -> a promise that settles when such a run has reached its turn, or failed to
     this.totals = new Map();    // Codex thread id -> cumulative token usage
     this.ready = null;
   }
@@ -192,7 +193,8 @@ export class CodexAppServerProvider {
     if (this.starting.has(key) || [...this.pending.values()].some(run => run.key === key)) throw new ProviderError('That conversation already has a request running.', 'busy');
     // The key is taken from here on, so a second run cannot slip in while this one starts.
     this.starting.add(key);
-    let halt;
+    let halt, arrived;
+    this.arriving.set(key, new Promise(done => { arrived = done; }));
     const halted = new Promise((_, reject) => { halt = () => reject(new ProviderError('Stopped.', 'stopped')); });
     halted.catch(() => {});
     signal?.addEventListener('abort', halt, { once: true });
@@ -226,7 +228,7 @@ export class CodexAppServerProvider {
       if (signal?.aborted) throw new ProviderError('Stopped.', 'stopped');
       if (this.rpc !== rpc) throw new ProviderError('The agent connection was closed.', 'unavailable');
       return this.turn({ rpc, key, threadId, cwd, parts, effort, policy, outputSchema, model, asked, onEvent, onText, streamOutput, onAsk, approvalPolicy, signal, timeout, idleTimeout });
-    } finally { this.starting.delete(key); signal?.removeEventListener('abort', halt); }
+    } finally { this.starting.delete(key); this.arriving.delete(key); arrived(); signal?.removeEventListener('abort', halt); }
   }
 
   // Starts the turn and returns the promise that settles when it ends. The run is in
@@ -239,11 +241,13 @@ export class CodexAppServerProvider {
         onText: typeof onText === 'function' ? onText : null, streamOutput: !!streamOutput, batch: createBatcher(this.streamBatch), messages: new Map(), segments: 0, streamed: new Set(),
         finish: (error, result) => {
           if (this.pending.get(threadId) !== run) return;
+          run.name();
           run.batch.flush();                                     // text still being gathered goes out before the result
           for (const asked of [...run.asking.values()]) asked.settle('cancel');   // nobody is waiting for these answers any more
           clearTimeout(run.timer); clearTimeout(run.grace); clearTimeout(run.idle); signal?.removeEventListener('abort', abort); this.pending.delete(threadId);
           error ? reject(error) : resolve(result);
         } };
+      run.named = new Promise(done => { run.name = done; });   // settles when the agent has named the turn, or the run is over
       run.timer = setTimeout(() => { this.cancel(key); this.threads.delete(key); run.finish(new ProviderError('The request ran out of time and was stopped.', 'timeout')); }, Math.min(Math.max(0, Number(timeout) || 0), 2 ** 31 - 1));
       const expire = () => { this.cancel(key); this.threads.delete(key); run.finish(new ProviderError('The agent went quiet and was stopped.', 'timeout')); };
       // Called for every notification about this run: the quiet period starts again.
@@ -255,6 +259,7 @@ export class CodexAppServerProvider {
       rpc.call('turn/start', { threadId, cwd, input: parts.map(said), effort, summary: 'auto', sandboxPolicy: policy, approvalPolicy,
         ...(outputSchema ? { outputSchema } : {}), ...model }).then(result => {
           run.turnId ||= result?.turn?.id;
+          if (run.turnId) run.name();
           if (run.cancelled && run.turnId) this.interrupt(run);
         }, error => run.finish(fromRpc(error)));
     });
@@ -266,6 +271,36 @@ export class CodexAppServerProvider {
     if (run.interrupted || !run.turnId) return;
     run.interrupted = true;
     this.rpc?.call('turn/interrupt', { threadId: run.threadId, turnId: run.turnId }).catch(() => {});
+  }
+
+  /**
+   * Sends more input into the turn that is running for `key`, without ending it (Codex's
+   * `turn/steer`). The agent takes it up at its next step. The request names the turn it
+   * is meant for, so input sent as a turn ends is refused by the agent rather than starting
+   * a turn nobody asked for: that, and there being no run at all, rejects with code 'ended'.
+   * @param {string} key
+   * @param {string|string[]} input
+   * @param {{clientUserMessageId?: string}} [options] an id of the host's for this message, passed to the agent
+   * @returns {Promise<{turnId: string}>} the agent's id for the turn that took the input
+   */
+  async steer(key, input, { clientUserMessageId } = {}) {
+    const parts = inputParts(input);
+    if (!parts.length) throw new ProviderError('Give the steer some input.', 'config');
+    const ended = () => new ProviderError('That request is no longer running, so there is nothing to steer.', 'ended');
+    // A run that is still starting (the child, the thread) has no turn to address the input to
+    // yet, and nor has one the agent has not named; a moment later there will be one.
+    if (this.starting.has(key)) await this.arriving.get(key);
+    const run = [...this.pending.values()].find(r => r.key === key), rpc = this.rpc;
+    if (run && !run.turnId && !run.cancelled) await run.named;
+    if (!run || !rpc || !run.turnId || run.cancelled || this.pending.get(run.threadId) !== run) throw ended();
+    try {
+      const answer = await rpc.call('turn/steer', { threadId: run.threadId, input: parts.map(said), expectedTurnId: run.turnId, ...(typeof clientUserMessageId === 'string' ? { clientUserMessageId } : {}) });
+      return { turnId: typeof answer?.turnId === 'string' ? answer.turnId : run.turnId };
+    } catch (error) {
+      // The agent refuses a steer whose turn is not the active one. If our run has gone too, that is why.
+      if (this.pending.get(run.threadId) !== run || error?.code === 'closed') throw ended();
+      throw Object.assign(fromRpc(error), { cause: error });
+    }
   }
 
   /** Asks the agent to stop the run for `key`. The run then rejects with code 'stopped'. */
@@ -344,6 +379,7 @@ export class CodexAppServerProvider {
     if (method === 'item/started' && item.type === 'agentMessage' && !run.messages.has(item.id)) run.messages.set(item.id, item.phase === 'commentary' ? { commentary: true } : { commentary: false, segment: run.segments++ });
     if (method === 'turn/started') {
       run.turnId = p.turn?.id || run.turnId;
+      if (run.turnId) run.name();
       if (run.cancelled && run.turnId) this.interrupt(run);
     }
     if (method === 'item/reasoning/summaryTextDelta') {

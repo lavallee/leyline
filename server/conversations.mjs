@@ -233,7 +233,9 @@ export async function readConversation(dir, key) {
  *   into turn.activities; `text` adds a piece of the reply to turn.preview while it arrives (the field is
  *   removed when the turn finishes and `message` holds the reply); `save` records what the host changed
  *   on the turn itself; `ask(question, { timeout, signal })` puts a question for a person on the turn
- *   (turn.asks) and resolves with the answer: pass it to a provider as `onAsk`.
+ *   (turn.asks) and resolves with the answer: pass it to a provider as `onAsk`; `steering(fn)` tells the
+ *   store how to send more input into this run (for a provider that can: `tools.steering(input =>
+ *   provider.steer(lane.id, input))`), which is what store.steer() then calls.
  * @param {number} [options.maxLanes] requests running at once per conversation; default 4
  * @param {number} [options.maxTurns] default 200
  * @param {number} [options.maxActivities] per turn; default 200
@@ -253,6 +255,10 @@ export async function readConversation(dir, key) {
  *   Default: answer 'decline' at once, so a host that does nothing about asks never has a turn waiting on one.
  * @param {number} [options.askTimeout] milliseconds an ask waits for a person before it is answered 'decline' and
  *   marked expired; default 300000. A provider may give a shorter time for one ask.
+ * @param {(input: string|string[], turn: object, lane: object) => Promise<any>} [options.steer] how to send more input into
+ *   a running turn, for store.steer(): typically `(input, turn, lane) => provider.steer(lane.id, input)`. A run may
+ *   instead say so itself with tools.steering(fn), which takes precedence for that run. Without either, store.steer()
+ *   answers 'unsupported'.
  * @param {object} [options.messages] wording overrides; see MESSAGES in this file. `interrupted`,
  *   `removed` and `stopped` may each be a function of the turn, for a host whose wording
  *   depends on the kind of request (what a stopped request leaves behind, say).
@@ -274,7 +280,7 @@ export async function readConversation(dir, key) {
 export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200, maxActivities = 200, saveDelay = 600, messages = {},
   describeFailure = error => String(error?.message || error).slice(0, 300), describeActivity, onLaneClosed, onCall, onError: report = () => {},
   fsync = false, stopGrace = Infinity, evictAfter = Infinity, coalesce = 50, coalesceChars = 4000, compactEvery = 1000, compactBytes = 1_000_000,
-  keepEvents = 2000, keepBytes = 4_000_000, onAsk = () => 'decline', askTimeout = 300000 } = {}) {
+  keepEvents = 2000, keepBytes = 4_000_000, onAsk = () => 'decline', askTimeout = 300000, steer: steerRun } = {}) {
   if (typeof dir !== 'string' || !dir) throw new TypeError('Give the store a directory.');
   if (typeof run !== 'function') throw new TypeError('Give the store a run(turn, lane, signal, tools) function.');
   const words = { ...MESSAGES, ...messages };
@@ -614,7 +620,8 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
       const next = queue.shift();
       const name = busy.some(r => r.lane.main) ? next.turn.id.slice(0, 8) : 'main';
       const lane = { id: `${key}:${name}`, name, main: name === 'main', key };
-      const runtime = { turn: next.turn, lane, controller: new AbortController(), timer: null, grace: null, soon: null, fresh: 0, asks: new Map() };
+      const runtime = { turn: next.turn, lane, controller: new AbortController(), timer: null, grace: null, soon: null, fresh: 0, asks: new Map(), steer: null };
+      runtime.entered = new Promise(resolve => { runtime.enter = resolve; });
       running.set(lane.id, runtime);
       execute(conversation, next, runtime).catch(onError).finally(() => {
         // The main lane may already have been taken again by the next turn: only this turn's own entry goes.
@@ -700,7 +707,9 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
     try {
       await persist(conversation);
       if (controller.signal.aborted) throw new Error(MESSAGES.stopped);   // stopped before it began: the host's run is never called
-      const work = Promise.resolve().then(() => run(turn, lane, controller.signal, { payload, conversation, activity, text, ask, save: () => save() }));
+      // `entered` settles once run() has been called and has done whatever it does before its first wait
+      // (which is where it says how it can be steered), or once it is known that it never will be.
+      const work = Promise.resolve().then(() => { try { return run(turn, lane, controller.signal, { payload, conversation, activity, text, ask, steering: fn => { runtime.steer = typeof fn === 'function' ? fn : null; }, save: () => save() }); } finally { runtime.enter(); } });
       work.catch(() => {});
       result = await Promise.race([work, new Promise((_, reject) => { runtime.abandon = () => reject(new Error(MESSAGES.stopped)); })]);
       if (controller.signal.aborted) throw new Error(MESSAGES.stopped);
@@ -714,7 +723,7 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
       turn.message = stopped ? say('stopped', turn) : guard(() => describeFailure(error, turn)) || 'The request could not be completed.';
     }
     for (const waiting of [...runtime.asks.values()]) waiting.settle('cancel', 'cancelled');   // the turn ended with a question still open
-    runtime.done = true;
+    runtime.done = true; runtime.enter();
     clearTimeout(runtime.timer); runtime.timer = null;
     clearTimeout(runtime.soon); runtime.soon = null;
     clearTimeout(runtime.grace); runtime.grace = null;
@@ -773,6 +782,38 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
     if (log?.shadows.has(found)) syncTurn(log, found);
     await persist(conversation);
     return found;
+  }
+
+  /**
+   * Sends more input into a running turn, and records it on the turn (turn.steers:
+   * [{ id, text, at }]) once the agent has taken it. Resolves to { steered, turn, reason? }:
+   *   { steered: true }                      the agent took the input
+   *   { steered: false, reason: 'ended' }    the turn has finished (perhaps a moment ago): send the input as a new request
+   *   { steered: false, reason: 'waiting' }  the turn has not started yet
+   *   { steered: false, reason: 'unsupported' }  nothing says how to steer this run (the store's `steer` option, or tools.steering)
+   * Rejects when the provider fails for another reason, and with 'not-found' for an unknown turn.
+   * @param {string|string[]} input text, or a list of texts sent as separate parts of one message
+   */
+  async function steer(key, id, input) {
+    const conversation = await open(key), found = await turn(key, id);
+    const parts = (Array.isArray(input) ? input : [input]).filter(part => typeof part === 'string' && part.length);
+    if (!parts.length) throw new ConversationError('Give the steer its text.', 'invalid');
+    if (found.status === 'queued') return { steered: false, reason: 'waiting', turn: found };
+    const runtime = lanesOf(key).find(r => r.turn === found);
+    if (!runtime || runtime.controller.signal.aborted) return { steered: false, reason: 'ended', turn: found };
+    await runtime.entered;                                     // a turn marked running a moment ago may not have reached its run yet
+    if (runtime.done || runtime.controller.signal.aborted) return { steered: false, reason: 'ended', turn: found };
+    const send = runtime.steer || (steerRun && (given => steerRun(given, found, runtime.lane)));
+    if (!send) return { steered: false, reason: 'unsupported', turn: found };
+    try { await send(Array.isArray(input) ? parts : parts[0]); }
+    catch (error) { if (error?.code === 'ended' || runtime.done) return { steered: false, reason: 'ended', turn: found }; throw error; }
+    // The agent has it. If the turn finished in the same moment the steer still happened, and is still recorded.
+    const log = logs.get(key);
+    if (!Array.isArray(found.steers)) found.steers = [];
+    found.steers.push({ id: randomUUID().slice(0, 8), text: parts.join('\n\n').slice(0, 20000), at: now() });
+    if (log.shadows.has(found)) syncTurn(log, found);
+    await persist(conversation);
+    return { steered: true, turn: found };
   }
 
   /**
@@ -897,7 +938,7 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
   }
 
   return {
-    open, send, turn, stop, stopAll, reset, busy, unload, update, snapshot, subscribe, answer,
+    open, send, turn, stop, stopAll, reset, busy, unload, update, snapshot, subscribe, answer, steer,
     /** The keys of the conversations in memory. */
     loaded: () => [...conversations.keys()],
     /** The loaded conversation for a key, or undefined before open(). */

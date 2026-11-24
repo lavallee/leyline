@@ -9,6 +9,7 @@ const send = message => process.stdout.write(JSON.stringify(message) + '\n');
 const note = (method, params) => send({ method, params });
 const threads = new Map();   // thread id -> { turns, total }
 const hanging = new Map();   // thread id -> turn id
+const steerable = new Map(); // thread id -> the turn that takes steers
 const asking = new Map();    // request id -> { threadId, turnId, wait: the ids still unanswered, replies }
 // The requests an app-server makes of its client, by the name a test's input gives them.
 const ASKS = {
@@ -52,8 +53,21 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   }
   if (method === 'turn/interrupt') {
     send({ id, result: {} });
+    steerable.delete(params.threadId);
     if (hanging.get(params.threadId) === params.turnId) { hanging.delete(params.threadId); note('turn/completed', { threadId: params.threadId, turn: { id: params.turnId, status: 'interrupted' } }); }
     return;
+  }
+  if (method === 'turn/steer') {
+    // As Codex does: the steer must name the turn that is active, or it is refused.
+    const active = steerable.get(params.threadId);
+    if (!active || active !== params.expectedTurnId) return send({ id, error: { code: -32600, message: `expected active turn id \`${params.expectedTurnId}\` but found \`${active ?? 'none'}\`` } });
+    send({ id, result: { turnId: active } });
+    const said = params.input.map(part => part.text).join(' | ');
+    note('item/completed', { threadId: params.threadId, item: { id: `u${++seq}`, type: 'userMessage', content: params.input } });
+    if (!said.includes('finish')) return;                   // steered, and still going
+    steerable.delete(params.threadId); hanging.delete(params.threadId);
+    note('item/completed', { threadId: params.threadId, item: { id: 'm9', type: 'agentMessage', text: `steered: ${said}` } });
+    return note('turn/completed', { threadId: params.threadId, turn: { id: active, status: 'completed' } });
   }
   if (method === 'turn/start') {
     const threadId = params.threadId, state = threads.get(threadId), turnId = `turn${++seq}`;
@@ -80,6 +94,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
       }
       return;
     }
+    if (text.includes('steerable')) { steerable.set(threadId, turnId); return hanging.set(threadId, turnId); }
     if (text.includes('hang')) return hanging.set(threadId, turnId);
     if (text.includes('deaf')) return;                      // never finishes, and an interrupt changes nothing
     if (text.includes('garbage')) {

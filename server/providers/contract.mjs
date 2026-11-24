@@ -6,9 +6,13 @@
 // with the reply.
 //
 //   provider.name            a short string: 'codex-app-server', 'cli-oneshot', 'http-chat'
-//   provider.capabilities    { activity, textStream, sessions, cancel, shell, structuredOutput, asks }
+//   provider.capabilities    { activity, textStream, sessions, cancel, shell, structuredOutput, asks, steer }
 //                            (`asks`: the agent's questions can wait for a person through `onAsk`)
 //   provider.run(request)    -> Promise<{ message, provenance, usage? }>
+//   provider.steer(key, input)  only where `capabilities.steer`: send more input into the run in flight for that
+//                            key, without ending it. Resolves once the agent has taken it; rejects with a
+//                            ProviderError whose code is 'ended' when there is no run to steer any more (the
+//                            turn has just finished: send the input as a new request instead).
 //   provider.cancel(key)     stop the run for that key, if one is in flight
 //   provider.reset(key)      forget what the provider remembers for that key
 //   provider.close()         release processes and sockets
@@ -59,12 +63,12 @@
 export class ProviderError extends Error {
   /**
    * @param {string} message
-   * @param {'stopped'|'timeout'|'unavailable'|'auth'|'failed'|'busy'|'config'} code
+   * @param {'stopped'|'timeout'|'unavailable'|'auth'|'failed'|'busy'|'config'|'ended'} code
    * @param {number} [status] an HTTP status a host may answer with
    */
   constructor(message, code = 'failed', status) {
     super(message); this.name = 'ProviderError'; this.code = code;
-    this.status = status ?? { stopped: 499, timeout: 504, unavailable: 503, auth: 503, busy: 409, config: 500 }[code] ?? 502;
+    this.status = status ?? { stopped: 499, timeout: 504, unavailable: 503, auth: 503, busy: 409, config: 500, ended: 409 }[code] ?? 502;
   }
 }
 
