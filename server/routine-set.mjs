@@ -80,12 +80,14 @@ export function headerFormat({ extension = '.js', comment = '//' } = {}) {
  *   A routine that names none runs on all of them; unknown names are dropped.
  * @param {{id: string, label: string, about?: string}[]} [options.kinds] groups, in menu order. A routine with no kind, or an unknown one, gets the last.
  * @param {{title?: number, description?: number, code?: number, note?: number}} [options.limits]
+ * @param {(error: Error) => void} [options.onError] told about each routine file that was left out because it
+ *   could not be read as a routine (`error.file`). Default: ignore.
  */
-export function createRoutineSet({ shipped = [], shippedDir, bankedDir, format = jsonFormat, engines = [], kinds = [], limits = {} } = {}) {
+export function createRoutineSet({ shipped = [], shippedDir, bankedDir, format = jsonFormat, engines = [], kinds = [], limits = {}, onError } = {}) {
   if (typeof bankedDir !== 'string' || !bankedDir) throw new TypeError('Give the routine set a folder for banked routines.');
   const max = { title: 100, description: 500, code: 12000, note: 500, ...limits };
   const kindIds = kinds.map(k => k.id), fallbackKind = kindIds.at(-1);
-  const bank = createRoutineBank({ shipped: shippedDir, banked: bankedDir, extension: format.extension, parse: format.parse, compose: format.compose });
+  const bank = createRoutineBank({ shipped: shippedDir, banked: bankedDir, extension: format.extension, parse: format.parse, compose: format.compose, onError });
   const shape = (r, source) => {
     const named = Array.isArray(r.engines) ? r.engines.filter(e => !engines.length || engines.includes(e)) : [];
     return { ...r, title: r.title || r.name, description: r.description ?? '', when: r.when ?? '', args: r.args ?? '',
