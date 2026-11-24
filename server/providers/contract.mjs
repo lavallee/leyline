@@ -6,7 +6,8 @@
 // with the reply.
 //
 //   provider.name            a short string: 'codex-app-server', 'cli-oneshot', 'http-chat'
-//   provider.capabilities    { activity, textStream, sessions, cancel, shell, structuredOutput }
+//   provider.capabilities    { activity, textStream, sessions, cancel, shell, structuredOutput, asks }
+//                            (`asks`: the agent's questions can wait for a person through `onAsk`)
 //   provider.run(request)    -> Promise<{ message, provenance, usage? }>
 //   provider.cancel(key)     stop the run for that key, if one is in flight
 //   provider.reset(key)      forget what the provider remembers for that key
@@ -21,6 +22,8 @@
 //   onText        called as onText(piece, { segment }) with pieces of the reply as they arrive (only where
 //                 `textStream`). `segment` counts the agent's messages within the turn: when it changes, a
 //                 new message has begun and what came before was a note along the way.
+//   onAsk         called as onAsk(ask, { signal }) when the agent needs a person's answer before it can go on
+//                 (only where `asks`). It returns the answer, or a promise of it: the run waits. See "Asks" below.
 //   signal        an AbortSignal; aborting rejects with a ProviderError whose code is 'stopped'
 //   timeout       milliseconds
 //
@@ -32,6 +35,20 @@
 //   output?   the tail of a finished command's output
 // Events with the same id describe the same item as it changes; foldActivity() below
 // keeps a list up to date from them.
+//
+// Asks: a request the agent makes of a person, in one shape whatever the agent.
+//   ask     { id, provider, method, kind, title, detail, options: [{ id, label, kind? }], questions? }
+//           kind: 'command' | 'file-change' | 'permissions' | 'input' | 'elicitation' | 'permission'
+//           detail: what is being asked about (a command and its folder, a reason, paths, a message)
+//           questions: for kind 'input', [{ id, header, question, options, other, secret }]
+//   answer  the id of one of the options, or an object { option, answers?, content? }:
+//           `answers` ({ questionId: text | [text] }) for kind 'input', `content` for 'elicitation'.
+//           The option ids every adapter understands are 'accept', 'decline' and 'cancel' (decline, and
+//           stop the turn); an adapter may offer more ('acceptForSession', or an agent's own option ids).
+//           Anything that is not an answer (a throw, nothing, an unknown id) is taken as 'decline'.
+// While an ask is waiting the run's idle timeout is paused; its overall timeout is not.
+// A host that keeps turns in ../conversations.mjs passes `onAsk: tools.ask`, which records
+// the question on the turn (turn.asks) until store.answer() or the store's onAsk policy settles it.
 //
 // result:
 //   message      the reply text
@@ -123,3 +140,10 @@ export function createBatcher({ ms = 40, chars = 400 } = {}) {
     flush,
   };
 }
+
+export const ASK_OPTIONS = ['accept', 'acceptForSession', 'decline', 'cancel'];
+/** The option an answer chose, as a string: the answer itself, or its `option`. Anything else is 'decline'. */
+export const chosenOption = answer => {
+  const option = typeof answer === 'string' ? answer : answer && typeof answer === 'object' ? answer.option ?? answer.decision : undefined;
+  return typeof option === 'string' && option ? option : 'decline';
+};

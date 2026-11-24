@@ -9,13 +9,38 @@ const send = message => process.stdout.write(JSON.stringify(message) + '\n');
 const note = (method, params) => send({ method, params });
 const threads = new Map();   // thread id -> { turns, total }
 const hanging = new Map();   // thread id -> turn id
+const asking = new Map();    // request id -> { threadId, turnId, wait: the ids still unanswered, replies }
+// The requests an app-server makes of its client, by the name a test's input gives them.
+const ASKS = {
+  command: (threadId, turnId) => ['item/commandExecution/requestApproval', { threadId, turnId, itemId: 'c7', startedAtMs: 1, environmentId: null, command: "/bin/bash -lc 'touch /etc/x'", cwd: '/work', reason: 'This writes outside the workspace.' }],
+  file: (threadId, turnId) => ['item/fileChange/requestApproval', { threadId, turnId, itemId: 'f7', startedAtMs: 1, reason: 'Outside the writable folders.', grantRoot: '/etc' }],
+  perms: (threadId, turnId) => ['item/permissions/requestApproval', { threadId, turnId, itemId: 'p7', environmentId: null, startedAtMs: 1, cwd: '/work', reason: 'Needs the network.', permissions: { network: { enabled: true }, fileSystem: null } }],
+  input: (threadId, turnId) => ['item/tool/requestUserInput', { threadId, turnId, itemId: 'u7', isBlocking: true, autoResolutionMs: null, questions: [
+    { id: 'tone', header: 'Tone', question: 'Which tone?', isOther: false, isSecret: false, options: [{ label: 'Formal', description: 'As for a report' }, { label: 'Plain', description: '' }] },
+    { id: 'token', header: 'Key', question: 'The token?', isOther: true, isSecret: true, options: null }] }],
+  elicit: (threadId, turnId) => ['mcpServer/elicitation/request', { threadId, turnId, serverName: 'notes', environmentId: null, mode: 'form', _meta: null, message: 'Which notebook?', requestedSchema: { type: 'object', properties: { notebook: { type: 'string' } } } }],
+  legacy: threadId => ['execCommandApproval', { conversationId: threadId, callId: 'x', command: ['rm', 'x'], cwd: '/work', reason: null }],
+  tool: (threadId, turnId) => ['item/tool/call', { threadId, turnId, callId: 'd7', tool: 'lookup', arguments: {} }],
+  unknown: () => ['attestation/generate', {}],
+};
+// A reply to one of our requests: when the turn has all of them, it ends with what it was told.
+function answered(message) {
+  const waiting = asking.get(message.id); if (!waiting) return;
+  asking.delete(message.id);
+  waiting.replies.push(message.error ? { error: message.error.code } : message.result);
+  waiting.wait.delete(message.id);
+  if (waiting.wait.size || !hanging.has(waiting.threadId)) return;
+  hanging.delete(waiting.threadId);
+  note('item/completed', { threadId: waiting.threadId, item: { id: 'm9', type: 'agentMessage', text: JSON.stringify(waiting.replies) } });
+  note('turn/completed', { threadId: waiting.threadId, turn: { id: waiting.turnId, status: 'completed' } });
+}
 let seq = 0;
 
 log({ env: { hasOpenAiKey: 'OPENAI_API_KEY' in process.env } });
 readline.createInterface({ input: process.stdin }).on('line', line => {
   const message = JSON.parse(line); log(message);
   const { id, method, params } = message;
-  if (method === undefined) return;                       // a reply to one of our requests
+  if (method === undefined) return answered(message);     // a reply to one of our requests
   if (method === 'initialize') return setTimeout(() => send({ id, result: {} }), Number(process.env.FAKE_SLOW_INIT || 0));
   if (method === 'initialized') return;
   if (method === 'config/read') return send({ id, result: { config: { mcp_servers: { notes: {}, mail: {} }, plugins: { helper: {} } } } });
@@ -36,6 +61,25 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     state.turns++;
     send({ id, result: { turn: { id: turnId } } });
     note('turn/started', { threadId, turn: { id: turnId } });
+    const asks = [...text.matchAll(/ask-(\w+)/g)].map(match => match[1]).filter(name => ASKS[name] || name === 'withdrawn');
+    if (asks.length) {
+      // Each request is sent and the turn waits for every answer (an interrupt ends it, as for 'hang').
+      const waiting = { threadId, turnId, wait: new Set(), replies: [] };
+      hanging.set(threadId, turnId);
+      for (const name of asks) {
+        const requestId = 9000 + ++seq, [asked, askedParams] = ASKS[name === 'withdrawn' ? 'command' : name](threadId, turnId);
+        send({ id: requestId, method: asked, params: askedParams });
+        if (name === 'withdrawn') {
+          // The agent takes the question back (it was answered somewhere else, say) and carries on.
+          note('serverRequest/resolved', { threadId, requestId });
+          hanging.delete(threadId);
+          note('item/completed', { threadId, item: { id: 'm9', type: 'agentMessage', text: 'withdrawn' } });
+          return note('turn/completed', { threadId, turn: { id: turnId, status: 'completed' } });
+        }
+        waiting.wait.add(requestId); asking.set(requestId, waiting);
+      }
+      return;
+    }
     if (text.includes('hang')) return hanging.set(threadId, turnId);
     if (text.includes('deaf')) return;                      // never finishes, and an interrupt changes nothing
     if (text.includes('garbage')) {

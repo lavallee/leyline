@@ -31,7 +31,7 @@
 import { appendFile, mkdir, open as openFile, readFile, readdir, rename, rm, stat, truncate, writeFile } from 'node:fs/promises';
 import { createHash, hash, randomBytes, randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { foldActivity, settleActivity } from './providers/contract.mjs';
+import { chosenOption, foldActivity, settleActivity } from './providers/contract.mjs';
 import { applyEvent, formatCursor, parseCursor } from './events.mjs';
 
 export const TURN_STATUSES = ['queued', 'running', 'succeeded', 'failed', 'stopped'];
@@ -55,7 +55,7 @@ const MESSAGES = {
 /**
  * An error the store raises on purpose. `code`: 'full' | 'busy' | 'not-found' | 'invalid' |
  * 'unreadable' (a conversation file exists but could not be read; nothing was changed) |
- * 'closed' (send() after close()) |
+ * 'closed' (send() after close()) | 'answered' (answer() for a question that is no longer waiting) |
  * 'corrupt' (only ever passed to onError: a file was not a conversation and was moved
  * aside to `error.file`).
  */
@@ -232,7 +232,8 @@ export async function readConversation(dir, key) {
  *   whatever the host passed to send() and is never written to disk; `activity` folds a provider event
  *   into turn.activities; `text` adds a piece of the reply to turn.preview while it arrives (the field is
  *   removed when the turn finishes and `message` holds the reply); `save` records what the host changed
- *   on the turn itself.
+ *   on the turn itself; `ask(question, { timeout, signal })` puts a question for a person on the turn
+ *   (turn.asks) and resolves with the answer: pass it to a provider as `onAsk`.
  * @param {number} [options.maxLanes] requests running at once per conversation; default 4
  * @param {number} [options.maxTurns] default 200
  * @param {number} [options.maxActivities] per turn; default 200
@@ -246,6 +247,12 @@ export async function readConversation(dir, key) {
  * @param {number} [options.keepEvents] recent events kept in memory per conversation, for subscribers that
  *   resume; default 2000. A subscriber that asks for something older is told there is a gap.
  * @param {number} [options.keepBytes] the same, by size; default 4,000,000
+ * @param {(ask: object, turn: object) => any} [options.onAsk] the policy for questions an agent asks of a person
+ *   (see "Asks" in ./providers/contract.mjs). It is called with each ask as it is recorded and may answer it at once
+ *   by returning an answer, or a promise of one; returning nothing leaves the ask waiting for store.answer().
+ *   Default: answer 'decline' at once, so a host that does nothing about asks never has a turn waiting on one.
+ * @param {number} [options.askTimeout] milliseconds an ask waits for a person before it is answered 'decline' and
+ *   marked expired; default 300000. A provider may give a shorter time for one ask.
  * @param {object} [options.messages] wording overrides; see MESSAGES in this file. `interrupted`,
  *   `removed` and `stopped` may each be a function of the turn, for a host whose wording
  *   depends on the kind of request (what a stopped request leaves behind, say).
@@ -267,7 +274,7 @@ export async function readConversation(dir, key) {
 export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200, maxActivities = 200, saveDelay = 600, messages = {},
   describeFailure = error => String(error?.message || error).slice(0, 300), describeActivity, onLaneClosed, onCall, onError: report = () => {},
   fsync = false, stopGrace = Infinity, evictAfter = Infinity, coalesce = 50, coalesceChars = 4000, compactEvery = 1000, compactBytes = 1_000_000,
-  keepEvents = 2000, keepBytes = 4_000_000 } = {}) {
+  keepEvents = 2000, keepBytes = 4_000_000, onAsk = () => 'decline', askTimeout = 300000 } = {}) {
   if (typeof dir !== 'string' || !dir) throw new TypeError('Give the store a directory.');
   if (typeof run !== 'function') throw new TypeError('Give the store a run(turn, lane, signal, tools) function.');
   const words = { ...MESSAGES, ...messages };
@@ -543,6 +550,7 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
           Object.assign(turn, { status: 'failed', message: say('interrupted', turn), finishedAt: turn.finishedAt || now() });
           if (!Array.isArray(turn.activities)) turn.activities = [];
           settleActivity(turn.activities, false); delete turn.preview; recovered = true;
+          if (Array.isArray(turn.asks)) for (const asked of turn.asks) if (asked?.status === 'pending') Object.assign(asked, { status: 'cancelled', answer: 'cancel', answeredAt: now() });
           syncTurn(log, turn);
         }
         logs.set(key, log);
@@ -606,7 +614,7 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
       const next = queue.shift();
       const name = busy.some(r => r.lane.main) ? next.turn.id.slice(0, 8) : 'main';
       const lane = { id: `${key}:${name}`, name, main: name === 'main', key };
-      const runtime = { turn: next.turn, lane, controller: new AbortController(), timer: null, grace: null, soon: null, fresh: 0 };
+      const runtime = { turn: next.turn, lane, controller: new AbortController(), timer: null, grace: null, soon: null, fresh: 0, asks: new Map() };
       running.set(lane.id, runtime);
       execute(conversation, next, runtime).catch(onError).finally(() => {
         // The main lane may already have been taken again by the next turn: only this turn's own entry goes.
@@ -654,13 +662,45 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
       turn.preview = `${turn.preview || ''}${piece}`.slice(-MAX_PREVIEW);
       save(piece.length);
     };
+    // A question for a person. It is recorded on the turn, offered to the store's policy, and
+    // otherwise waits for answer(), the time limit, or the end of the turn, whichever is first.
+    const ask = (question, { timeout = askTimeout, signal: unwanted } = {}) => new Promise(resolve => {
+      if (runtime.done || controller.signal.aborted || unwanted?.aborted) return resolve('cancel');
+      const { id: given, kind, title, detail, options, questions, provider, method } = question && typeof question === 'object' ? question : {};
+      if (!Array.isArray(turn.asks)) turn.asks = [];
+      let id = typeof given === 'string' && given && given.length <= 100 ? given : `ask-${turn.asks.length + 1}`;
+      while (turn.asks.some(a => a?.id === id)) id = `${id}-${turn.asks.length + 1}`;
+      const entry = { id, kind: typeof kind === 'string' ? kind : 'other', title: typeof title === 'string' ? title.slice(0, 300) : '', ...(provider ? { provider: String(provider) } : {}), ...(method ? { method: String(method) } : {}),
+        detail: detail && typeof detail === 'object' ? detail : {}, options: (Array.isArray(options) ? options : []).filter(o => o && typeof o.id === 'string').slice(0, 20),
+        ...(Array.isArray(questions) ? { questions } : {}), status: 'pending', askedAt: now() };
+      let timer = null;
+      const settle = (answer, status) => {
+        if (entry.status !== 'pending') return false;
+        clearTimeout(timer); unwanted?.removeEventListener('abort', withdrawn); runtime.asks.delete(id);
+        // What was chosen is kept; what was typed in reply (which may be a secret) is not.
+        Object.assign(entry, { status, answer: chosenOption(answer), answeredAt: now() });
+        if (!runtime.done) { runtime.changed = true; log.dirty.add(turn); syncTurn(log, turn); persist(conversation).catch(onError); }
+        resolve(answer);
+        return true;
+      };
+      const withdrawn = () => settle('cancel', 'cancelled');
+      turn.asks.push(entry);
+      runtime.asks.set(id, { entry, settle });
+      unwanted?.addEventListener('abort', withdrawn, { once: true });
+      syncTurn(log, turn); persist(conversation).catch(onError);
+      Promise.resolve().then(() => onAsk(entry, turn)).then(answer => {
+        if (answer !== undefined && answer !== null) return settle(answer, 'answered');
+        if (entry.status === 'pending' && timeout > 0 && Number.isFinite(timeout)) { timer = setTimeout(() => settle('decline', 'expired'), Math.min(timeout, 2 ** 31 - 1)); timer.unref?.(); }
+      }, error => { onError(error); settle('decline', 'answered'); });
+    });
+    controller.signal.addEventListener('abort', () => { for (const waiting of [...runtime.asks.values()]) waiting.settle('cancel', 'cancelled'); }, { once: true });
     let result, failure;
     Object.assign(turn, { status: 'running', startedAt: now(), lane: lane.name });
     syncTurn(log, turn);
     try {
       await persist(conversation);
       if (controller.signal.aborted) throw new Error(MESSAGES.stopped);   // stopped before it began: the host's run is never called
-      const work = Promise.resolve().then(() => run(turn, lane, controller.signal, { payload, conversation, activity, text, save: () => save() }));
+      const work = Promise.resolve().then(() => run(turn, lane, controller.signal, { payload, conversation, activity, text, ask, save: () => save() }));
       work.catch(() => {});
       result = await Promise.race([work, new Promise((_, reject) => { runtime.abandon = () => reject(new Error(MESSAGES.stopped)); })]);
       if (controller.signal.aborted) throw new Error(MESSAGES.stopped);
@@ -673,6 +713,7 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
       turn.status = stopped ? 'stopped' : 'failed';
       turn.message = stopped ? say('stopped', turn) : guard(() => describeFailure(error, turn)) || 'The request could not be completed.';
     }
+    for (const waiting of [...runtime.asks.values()]) waiting.settle('cancel', 'cancelled');   // the turn ended with a question still open
     runtime.done = true;
     clearTimeout(runtime.timer); runtime.timer = null;
     clearTimeout(runtime.soon); runtime.soon = null;
@@ -731,6 +772,26 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
     const log = logs.get(key);
     if (log?.shadows.has(found)) syncTurn(log, found);
     await persist(conversation);
+    return found;
+  }
+
+  /**
+   * Answers a question that is waiting on a turn (turn.asks, status 'pending'). `decision` is
+   * the id of one of the ask's options, or an object { option, answers?, content? }: see
+   * "Asks" in ./providers/contract.mjs. Resolves to the turn. Rejects with code 'not-found'
+   * when the turn has no such ask, and with code 'answered' (409) when it is no longer
+   * waiting: it was answered, it expired, or the turn has ended.
+   */
+  async function answer(key, id, askId, decision) {
+    const found = await turn(key, id);
+    const runtime = lanesOf(key).find(r => r.turn === found), waiting = runtime?.asks.get(askId);
+    if (!waiting) {
+      if (!(found.asks || []).some(a => a?.id === askId)) throw new ConversationError('That question is not on this request.', 'not-found');
+      throw new ConversationError('That question is no longer waiting for an answer.', 'answered', 409);
+    }
+    if (decision === undefined || decision === null) throw new ConversationError('Give the answer: the id of one of the options.', 'invalid');
+    waiting.settle(decision, 'answered');
+    await persist(await open(key));
     return found;
   }
 
@@ -836,7 +897,7 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
   }
 
   return {
-    open, send, turn, stop, stopAll, reset, busy, unload, update, snapshot, subscribe,
+    open, send, turn, stop, stopAll, reset, busy, unload, update, snapshot, subscribe, answer,
     /** The keys of the conversations in memory. */
     loaded: () => [...conversations.keys()],
     /** The loaded conversation for a key, or undefined before open(). */

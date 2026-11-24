@@ -43,7 +43,7 @@
 import { mkdir, readFile as readDisk, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { JsonRpcStdio, RpcError } from '../jsonrpc-stdio.mjs';
-import { ProviderError, inputParts } from './contract.mjs';
+import { ProviderError, chosenOption, inputParts } from './contract.mjs';
 import { SHORT_NAME, PACKAGE_VERSION } from '../package-info.mjs';
 
 export const ACP_PROTOCOL_VERSION = 1;
@@ -125,7 +125,7 @@ export function sliceLines(content, line, limit) {
 
 export class AcpProvider {
   name = 'acp';
-  capabilities = { activity: true, textStream: true, sessions: true, cancel: true, shell: true, structuredOutput: false };
+  capabilities = { activity: true, textStream: true, sessions: true, cancel: true, shell: true, structuredOutput: false, asks: true };
 
   /**
    * @param {object} options
@@ -245,6 +245,11 @@ export class AcpProvider {
    * @param {(diff: object) => void} [request.onDiff] called with each `diff` an agent attaches to a tool call:
    *   { id, toolCallId, index, path, oldText, newText, status, title, toolKind, key, sessionId }. `status` is ACP's
    *   ('pending', 'in_progress', 'completed', 'failed'); the same id is reported again when its text or status changes.
+   * @param {(ask: object, context: {signal: AbortSignal}) => any} [request.onAsk] answers a permission request in the
+   *   provider-neutral shape ("Asks" in ./contract.mjs): kind 'permission', the agent's own options (their ids are the
+   *   agent's optionIds, each with its ACP `kind`). It is asked after `onPermission` when that hook leaves the request
+   *   undecided, and before the `permission` policy. The answer is one of the option ids, or 'accept' (the first
+   *   allow_once option), 'acceptForSession' (the first allow_always), 'decline' or 'cancel'.
    * @param {(update: object) => void} [request.onUpdate] every raw `session/update` payload of the turn, unmapped
    * @param {number} [request.idleTimeout] stop the run when the agent sends nothing for this long; 0 is no limit.
    *   The clock is paused while a hook (a permission question, a file read) is being answered.
@@ -252,7 +257,7 @@ export class AcpProvider {
    * prompt of a new session. `onText(piece, { segment })` receives agent text as it arrives; `segment` counts the
    * agent's messages within the turn, so a host showing a preview can tell when a new one begins.
    */
-  run({ key, input, instructions, cwd, sessionId, mcpServers, additionalDirectories, onEvent, onText, onDiff, onUpdate, signal, timeout = 900000, idleTimeout = this.idleTimeout } = {}) {
+  run({ key, input, instructions, cwd, sessionId, mcpServers, additionalDirectories, onEvent, onText, onDiff, onUpdate, onAsk, signal, timeout = 900000, idleTimeout = this.idleTimeout } = {}) {
     try {
       if (typeof key !== 'string' || !key) throw new ProviderError('Give the run a conversation key.', 'config');
       const parts = inputParts(input);
@@ -262,7 +267,7 @@ export class AcpProvider {
       if (this.runs.has(key)) throw new ProviderError('That conversation already has a request running.', 'busy');
       return new Promise((resolve, reject) => {
         const abort = () => this.cancel(key);
-        const run = { key, parts, instructions, cwd, savedId: sessionId, mcpServers, additionalDirectories, onEvent, onText, onDiff, onUpdate, idleTimeout,
+        const run = { key, parts, instructions, cwd, savedId: sessionId, mcpServers, additionalDirectories, onEvent, onText, onDiff, onUpdate, onAsk: typeof onAsk === 'function' ? onAsk : null, idleTimeout,
           phase: 'setup', sessionId: null, how: null, cancelled: false, over: false, waiting: 0, asking: new Set(), tools: new Map(),
           text: '', all: '', segment: 0, messageId: null, boundary: false, thought: null, thoughts: 0, notes: 0, context: null,
           finish: (error, result) => {
@@ -528,14 +533,26 @@ export class AcpProvider {
     const { sent, ...toolCall } = call;
     const request = { ...context, toolCall, options, diffs: call.content.filter(item => item?.type === 'diff') };
     let choice;
-    if (this.onPermission) {
+    // Asks one hook, giving up the moment the turn is stopped.
+    const consult = async hook => {
       const controller = new AbortController();
       let stop;
       const stopped = new Promise(resolve => { stop = () => { controller.abort(); resolve('cancelled'); }; });
       run.asking.add(stop);
-      try { choice = await Promise.race([Promise.resolve().then(() => this.onPermission(request, { signal: controller.signal })), stopped]); }
-      catch { choice = 'reject_once'; }
+      try { return await Promise.race([Promise.resolve().then(() => hook({ signal: controller.signal })), stopped]); }
+      catch { return 'reject_once'; }
       finally { run.asking.delete(stop); }
+    };
+    if (this.onPermission) choice = await consult(context => this.onPermission(request, context));
+    if (!present(choice) && run.onAsk && !run.over && !run.cancelled) {
+      // The same question in the shape every provider uses, so one panel can show an ACP agent's and a Codex agent's alike.
+      const places = [...new Set([...call.locations.map(place => place?.path), ...request.diffs.map(diff => diff.path)].filter(p => typeof p === 'string'))];
+      const ask = { id: `ask-${present(call.toolCallId) ? call.toolCallId : ++run.notes}`, provider: this.name, method: 'session/request_permission', kind: 'permission',
+        title: call.title || TITLES[call.kind] || TITLES.other, detail: { toolKind: call.kind, ...(places.length ? { paths: places } : {}), ...(request.diffs.length ? { diffs: request.diffs.length } : {}) },
+        options: options.map(option => ({ id: option.optionId, label: typeof option.name === 'string' ? option.name : option.optionId, kind: option.kind })) };
+      const given = await consult(context => run.onAsk(ask, context));
+      // No answer at all leaves the request to the `permission` policy, as with onPermission.
+      if (present(given)) { const answer = chosenOption(given); choice = { accept: 'allow_once', acceptForSession: 'allow_always', decline: 'reject_once', cancel: 'cancelled', cancelled: 'cancelled' }[answer] || answer; }
     }
     if (run.over || run.cancelled || choice === 'cancelled') return CANCELLED;
     if (!present(choice)) {

@@ -4,14 +4,16 @@
 //
 // What the host decides, per run: the sandbox (read-only, or workspace-write with the
 // folders it names), the instructions, the input. What this adapter always does:
-// - approval requests are answered by `onApproval`, which declines by default, so the
-//   sandbox is the boundary;
+// - a request the agent makes of the client (an approval, a question) is answered in the
+//   shape that request expects. It goes to the run's `onAsk`, which may wait for a person;
+//   with no `onAsk` it is declined, so the sandbox is the boundary. Approvals are only
+//   asked for at all when a run sets `approvalPolicy` to something other than 'never';
 // - raw reasoning is never read or passed on, only the summaries the agent publishes;
 // - with `disableUserExtensions` (the default) the MCP servers, plugins and apps in the
 //   user's own Codex configuration are switched off for these threads.
 import { mkdir } from 'node:fs/promises';
 import { CodexRpc } from '../codex-rpc.mjs';
-import { ProviderError, createBatcher, inputParts } from './contract.mjs';
+import { ProviderError, chosenOption, createBatcher, inputParts } from './contract.mjs';
 import { SHORT_NAME } from '../package-info.mjs';
 
 const ZERO = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 };
@@ -21,13 +23,60 @@ const words = value => typeof value === 'string' ? value : '';
 const fromRpc = error => error instanceof ProviderError ? error
   : new ProviderError(String(error?.message || error).slice(0, 300), { closed: 'unavailable', timeout: 'timeout' }[error?.code] || 'failed');
 
+// ---------------------------------------------------------------- requests the agent makes of the client
+// Checked against the types `codex app-server generate-ts` writes for Codex CLI 0.171.0
+// (ServerRequest.ts and the v2 params and response types it names). Each entry says what
+// the request asks of a person and what a reply to it looks like; a reply of another shape
+// is an error on the agent's side.
+const text = value => typeof value === 'string' ? value : undefined;
+const clean = object => Object.fromEntries(Object.entries(object).filter(([, value]) => value !== undefined && value !== null));
+const option = (id, label) => ({ id, label });
+const APPROVAL = [option('accept', 'Allow'), option('acceptForSession', 'Allow for this session'), option('decline', 'Decline'), option('cancel', 'Decline and stop')];
+const approval = answer => { const chosen = chosenOption(answer); return ['accept', 'acceptForSession', 'decline', 'cancel'].includes(chosen) ? chosen : 'decline'; };
+// The older approval requests answer in an older vocabulary (ReviewDecision).
+const review = answer => ({ accept: 'approved', acceptForSession: 'approved_for_session', cancel: 'abort' })[approval(answer)] || { denied: { rejection: 'Declined.' } };
+export const CODEX_REQUESTS = {
+  // CommandExecutionRequestApprovalResponse: { decision: 'accept' | 'acceptForSession' | 'decline' | 'cancel' | { ...amendment } }
+  'item/commandExecution/requestApproval': { kind: 'command',
+    ask: p => ({ title: 'Run a command', detail: clean({ command: p.command === undefined || p.command === null ? undefined : commandLine(p.command), cwd: text(p.cwd), reason: text(p.reason), itemId: text(p.itemId) }), options: APPROVAL }),
+    reply: answer => ({ decision: approval(answer) }) },
+  // FileChangeRequestApprovalResponse: { decision: 'accept' | 'acceptForSession' | 'decline' | 'cancel' }
+  'item/fileChange/requestApproval': { kind: 'file-change',
+    ask: p => ({ title: 'Change files', detail: clean({ reason: text(p.reason), grantRoot: text(p.grantRoot), itemId: text(p.itemId) }), options: APPROVAL }),
+    reply: answer => ({ decision: approval(answer) }) },
+  // PermissionsRequestApprovalResponse: { permissions: GrantedPermissionProfile, scope: 'turn' | 'session' }
+  'item/permissions/requestApproval': { kind: 'permissions',
+    ask: p => ({ title: 'Grant more access', detail: clean({ reason: text(p.reason), cwd: text(p.cwd), permissions: p.permissions }), options: APPROVAL.slice(0, 3) }),
+    reply: (answer, p) => { const chosen = approval(answer), granted = chosen === 'accept' || chosen === 'acceptForSession';
+      return { permissions: granted && p.permissions && typeof p.permissions === 'object' ? clean({ network: p.permissions.network, fileSystem: p.permissions.fileSystem }) : {}, scope: chosen === 'acceptForSession' ? 'session' : 'turn' }; } },
+  // ToolRequestUserInputResponse: { answers: { [questionId]: { answers: string[] } } }
+  'item/tool/requestUserInput': { kind: 'input',
+    ask: p => ({ title: 'A question from the agent', detail: {}, options: [option('accept', 'Answer'), option('decline', 'Do not answer')],
+      questions: (Array.isArray(p.questions) ? p.questions : []).filter(q => q && typeof q.id === 'string').map(q => ({ id: q.id, header: text(q.header) || '', question: text(q.question) || '',
+        options: Array.isArray(q.options) ? q.options.filter(Boolean).map(o => ({ label: String(o.label ?? ''), description: String(o.description ?? '') })) : null, other: !!q.isOther, secret: !!q.isSecret })) }),
+    reply: answer => { const given = approval(answer) === 'accept' && answer && typeof answer.answers === 'object' && answer.answers ? answer.answers : {};
+      return { answers: Object.fromEntries(Object.entries(given).filter(([, value]) => typeof value === 'string' || Array.isArray(value)).map(([id, value]) => [id, { answers: (Array.isArray(value) ? value : [value]).map(String) }])) }; } },
+  // McpServerElicitationRequestResponse: { action: 'accept' | 'decline' | 'cancel', content, _meta }
+  'mcpServer/elicitation/request': { kind: 'elicitation',
+    ask: p => ({ title: `A question from ${text(p.serverName) || 'a tool'}`, detail: clean({ server: text(p.serverName), message: text(p.message), mode: text(p.mode), url: text(p.url), schema: p.requestedSchema }),
+      options: [option('accept', 'Answer'), option('decline', 'Decline'), option('cancel', 'Cancel')] }),
+    reply: answer => { const chosen = approval(answer), action = chosen === 'acceptForSession' ? 'accept' : chosen;
+      return { action, content: action === 'accept' ? (answer && typeof answer === 'object' && answer.content !== undefined ? answer.content : {}) : null, _meta: null }; } },
+  // ExecCommandApprovalResponse and ApplyPatchApprovalResponse: { decision: ReviewDecision }
+  execCommandApproval: { kind: 'command', ask: p => ({ title: 'Run a command', detail: clean({ command: p.command === undefined ? undefined : commandLine(p.command), cwd: text(p.cwd), reason: text(p.reason) }), options: APPROVAL }), reply: answer => ({ decision: review(answer) }) },
+  applyPatchApproval: { kind: 'file-change', ask: p => ({ title: 'Change files', detail: clean({ reason: text(p.reason), grantRoot: text(p.grantRoot) }), options: APPROVAL }), reply: answer => ({ decision: review(answer) }) },
+  // DynamicToolCallResponse: { contentItems, success }. This client offers the agent no tools of its own.
+  'item/tool/call': { reply: () => ({ contentItems: [{ type: 'inputText', text: 'This client offers no tools.' }], success: false }) },
+};
+const RESOLVED = Symbol('resolved');
+
 /** A command as the agent ran it, without the shell wrapper Codex puts around it. */
 export const commandLine = command => (Array.isArray(command) ? command.join(' ') : String(command || ''))
   .replace(/^\/\S*\/(?:ba|z)?sh -l?c /, '').replace(/^(['"])([\s\S]*)\1$/, '$2');
 
 export class CodexAppServerProvider {
   name = 'codex-app-server';
-  capabilities = { activity: true, textStream: true, sessions: true, cancel: true, shell: true, structuredOutput: true };
+  capabilities = { activity: true, textStream: true, sessions: true, cancel: true, shell: true, structuredOutput: true, asks: true };
 
   /**
    * @param {object} options
@@ -40,8 +89,10 @@ export class CodexAppServerProvider {
    * @param {boolean} [options.disableUserExtensions] default true
    * @param {object} [options.threadConfig] extra Codex config for every thread
    * @param {string} [options.model] default: the model the app-server lists as its default
-   * @param {(request: object) => object|Promise<object>} [options.onApproval] answers an approval request; default declines.
-   *   A callback that throws, rejects or returns nothing declines.
+   * @param {(request: object) => object|Promise<object>} [options.onApproval] the older hook, kept for hosts that have one:
+   *   it sees every request the agent makes, as the raw JSON-RPC message, before anything else does, and an object it
+   *   returns is sent back as the reply exactly as given. When it returns nothing, or throws, the request goes on to the
+   *   run's `onAsk` and from there to a decline. New hosts should use `onAsk`.
    * @param {(chunk: Buffer) => void} [options.onStderr]
    * @param {number} [options.stopGrace] milliseconds a stopped run waits for the agent to confirm before it is
    *   ended anyway and its thread forgotten; default 10000. Infinity waits for the run's own timeout.
@@ -60,7 +111,7 @@ export class CodexAppServerProvider {
     Object.assign(this, { command, workDir, serviceName: serviceName || clientInfo.name, disableUserExtensions, threadConfig, fixedModel: model, onStderr, stopGrace, killGrace, maxLine, processGroup, streamBatch });
     this.clientInfo = { name: clientInfo.name, title: clientInfo.title || clientInfo.name, version: clientInfo.version || '0.0.0' };
     this.env = Object.fromEntries(Object.entries(env).filter(([name]) => !dropEnv.includes(name)));
-    this.onApproval = onApproval || (() => ({ decision: 'decline' }));
+    this.onApproval = typeof onApproval === 'function' ? onApproval : null;
     this.threads = new Map();   // host key -> Codex thread id
     this.pending = new Map();   // Codex thread id -> the run in flight
     this.starting = new Set();  // host keys whose run has not reached its turn yet
@@ -76,11 +127,7 @@ export class CodexAppServerProvider {
       const rpc = this.rpc = new CodexRpc({ command: this.command, cwd: this.workDir, env: this.env, killGrace: this.killGrace, processGroup: this.processGroup, ...(this.maxLine ? { maxLine: this.maxLine } : {}) });
       // What the child sends is data: a message in an unexpected form is skipped, never thrown.
       rpc.on('notification', message => { try { this.event(message); } catch { /* skipped */ } });
-      rpc.on('request', message => {
-        const decline = { decision: 'decline' };
-        Promise.resolve().then(() => this.onApproval(message)).then(answer => answer && typeof answer === 'object' ? answer : decline, () => decline)
-          .then(answer => rpc.reply(message.id, answer)).catch(() => {});
-      });
+      rpc.on('request', message => { this.request(rpc, message).catch(() => {}); });
       rpc.on('stderr', chunk => { try { this.onStderr?.(chunk); } catch { /* a host's handler must not break the child's output */ } });
       const child = rpc.start();
       const failed = () => {
@@ -124,13 +171,20 @@ export class CodexAppServerProvider {
    * @param {string} [request.model] a model for this run, instead of the provider's
    * @param {number} [request.idleTimeout] milliseconds without any word from the agent about this run after which
    *   it is stopped with code 'timeout', as when `timeout` passes. Default: none
+   * @param {'never'|'on-request'|'untrusted'|object} [request.approvalPolicy] when the agent asks before acting
+   *   (Codex's AskForApproval). Default 'never': it never asks, and what the sandbox forbids simply fails. With
+   *   'on-request' or 'untrusted' it sends approval requests, which go to `onAsk`.
+   * @param {(ask: object, context: {signal: AbortSignal}) => any} [request.onAsk] answers a request the agent makes of a
+   *   person; see "Asks" in ./contract.mjs. May return a promise: the turn waits, and the idle timeout is paused
+   *   meanwhile. Without it every such request is declined at once. `signal` aborts when the answer is no longer
+   *   wanted (the turn was stopped, or the agent withdrew the request).
    * @param {(piece: string, at: {segment: number}) => void} [request.onText] the reply as it is written. Messages the
    *   agent marks as commentary are not passed here; they arrive through onEvent as an "Agent note" that grows.
    * @param {boolean} [request.streamOutput] also pass on a command's output while it runs, as `append` events on the
    *   command's activity item (the item then holds the output as it came, instead of only its tail at the end).
    *   Default false, so a host's activity list is unchanged unless it asks.
    */
-  async run({ key, instructions, input, effort = 'low', sandbox = {}, outputSchema, threadConfig, model: asked, onEvent = () => {}, onText, streamOutput = false, signal, timeout = 900000, idleTimeout } = {}) {
+  async run({ key, instructions, input, effort = 'low', sandbox = {}, outputSchema, threadConfig, model: asked, onEvent = () => {}, onText, streamOutput = false, onAsk, approvalPolicy = 'never', signal, timeout = 900000, idleTimeout } = {}) {
     if (typeof key !== 'string' || !key) throw new ProviderError('Give the run a conversation key.', 'config');
     const parts = inputParts(input);
     if (!parts.length) throw new ProviderError('Give the run some input.', 'config');
@@ -158,7 +212,7 @@ export class CodexAppServerProvider {
       const model = named ? { model: named } : {};
       let threadId = this.threads.get(key);
       if (!threadId) {
-        const thread = rpc.call('thread/start', { cwd, approvalPolicy: 'never', sandbox: write ? 'workspace-write' : 'read-only',
+        const thread = rpc.call('thread/start', { cwd, approvalPolicy, sandbox: write ? 'workspace-write' : 'read-only',
           ...(instructions ? { developerInstructions: instructions } : {}), serviceName: this.serviceName,
           config: { ...this.disabled, ...this.threadConfig, ...threadConfig }, ...model }).then(response => {
           const id = response?.thread?.id;
@@ -171,31 +225,34 @@ export class CodexAppServerProvider {
       }
       if (signal?.aborted) throw new ProviderError('Stopped.', 'stopped');
       if (this.rpc !== rpc) throw new ProviderError('The agent connection was closed.', 'unavailable');
-      return this.turn({ rpc, key, threadId, cwd, parts, effort, policy, outputSchema, model, asked, onEvent, onText, streamOutput, signal, timeout, idleTimeout });
+      return this.turn({ rpc, key, threadId, cwd, parts, effort, policy, outputSchema, model, asked, onEvent, onText, streamOutput, onAsk, approvalPolicy, signal, timeout, idleTimeout });
     } finally { this.starting.delete(key); signal?.removeEventListener('abort', halt); }
   }
 
   // Starts the turn and returns the promise that settles when it ends. The run is in
   // `pending` before this returns, so the key stays taken without a gap.
-  turn({ rpc, key, threadId, cwd, parts, effort, policy, outputSchema, model, asked, onEvent, onText, streamOutput, signal, timeout, idleTimeout }) {
+  turn({ rpc, key, threadId, cwd, parts, effort, policy, outputSchema, model, asked, onEvent, onText, streamOutput, onAsk, approvalPolicy, signal, timeout, idleTimeout }) {
     return new Promise((resolve, reject) => {
       const abort = () => this.cancel(key);
       const run = { key, threadId, model: asked, text: '', turnId: null, cancelled: false, onEvent, parts: new Set(), usageStart: this.totals.get(threadId) || ZERO,
+        onAsk: typeof onAsk === 'function' ? onAsk : null, asking: new Map(), waiting: 0,
         onText: typeof onText === 'function' ? onText : null, streamOutput: !!streamOutput, batch: createBatcher(this.streamBatch), messages: new Map(), segments: 0, streamed: new Set(),
         finish: (error, result) => {
           if (this.pending.get(threadId) !== run) return;
           run.batch.flush();                                     // text still being gathered goes out before the result
+          for (const asked of [...run.asking.values()]) asked.settle('cancel');   // nobody is waiting for these answers any more
           clearTimeout(run.timer); clearTimeout(run.grace); clearTimeout(run.idle); signal?.removeEventListener('abort', abort); this.pending.delete(threadId);
           error ? reject(error) : resolve(result);
         } };
       run.timer = setTimeout(() => { this.cancel(key); this.threads.delete(key); run.finish(new ProviderError('The request ran out of time and was stopped.', 'timeout')); }, Math.min(Math.max(0, Number(timeout) || 0), 2 ** 31 - 1));
       const expire = () => { this.cancel(key); this.threads.delete(key); run.finish(new ProviderError('The agent went quiet and was stopped.', 'timeout')); };
       // Called for every notification about this run: the quiet period starts again.
-      run.heard = () => { if (!(idleTimeout > 0)) return; clearTimeout(run.idle); run.idle = setTimeout(expire, Math.min(idleTimeout, 2 ** 31 - 1)); };
+      // While the agent is waiting on a person it is not the agent that is quiet: the clock is paused.
+      run.heard = () => { clearTimeout(run.idle); if (!(idleTimeout > 0) || run.waiting > 0) return; run.idle = setTimeout(expire, Math.min(idleTimeout, 2 ** 31 - 1)); };
       run.heard();
       this.pending.set(threadId, run);
       signal?.addEventListener('abort', abort, { once: true });
-      rpc.call('turn/start', { threadId, cwd, input: parts.map(said), effort, summary: 'auto', sandboxPolicy: policy,
+      rpc.call('turn/start', { threadId, cwd, input: parts.map(said), effort, summary: 'auto', sandboxPolicy: policy, approvalPolicy,
         ...(outputSchema ? { outputSchema } : {}), ...model }).then(result => {
           run.turnId ||= result?.turn?.id;
           if (run.cancelled && run.turnId) this.interrupt(run);
@@ -216,6 +273,7 @@ export class CodexAppServerProvider {
     const run = [...this.pending.values()].find(r => r.key === key); if (!run) return false;
     run.cancelled = true;
     if (run.turnId) this.interrupt(run);
+    for (const asked of [...run.asking.values()]) asked.settle('cancel');   // a question still open is answered: decline, and stop
     // An agent that never confirms the stop must not hold the run open. Its thread is in
     // an unknown state by then, so it is forgotten: the next run on this key starts afresh.
     if (!run.grace && Number.isFinite(this.stopGrace)) {
@@ -227,6 +285,33 @@ export class CodexAppServerProvider {
       run.grace.unref?.();
     }
     return true;
+  }
+
+  // A request from the agent: answered in the shape its method expects, after asking whoever the run names.
+  async request(rpc, message) {
+    const method = message?.method, id = message?.id, p = message?.params && typeof message.params === 'object' ? message.params : {};
+    const reply = result => { if (this.rpc === rpc) rpc.reply(id, result); };
+    if (this.onApproval) {
+      const given = await Promise.resolve().then(() => this.onApproval(message)).catch(() => undefined);
+      if (given && typeof given === 'object') return reply(given);
+    }
+    const kind = Object.hasOwn(CODEX_REQUESTS, method) ? CODEX_REQUESTS[method] : null;
+    // A method this client does not know is refused as JSON-RPC says to, so the agent is not left waiting.
+    if (!kind) { if (this.rpc === rpc) rpc.send({ id, error: { code: -32601, message: `Method not found: ${String(method).slice(0, 100)}` } }); return; }
+    if (!kind.ask) return reply(kind.reply(undefined, p));
+    const run = this.pending.get(p.threadId || p.conversationId);
+    let answer = 'decline';
+    if (run?.onAsk && !run.cancelled) {
+      const controller = new AbortController(), asked = {};
+      const settled = new Promise(resolve => { asked.settle = value => { controller.abort(); resolve(value); }; });
+      run.asking.set(id, asked); run.waiting++; clearTimeout(run.idle);
+      try { answer = await Promise.race([Promise.resolve().then(() => run.onAsk({ id: `ask-${id}`, provider: this.name, method, kind: kind.kind, ...kind.ask(p) }, { signal: controller.signal })), settled]); }
+      catch { answer = 'decline'; }
+      finally { run.asking.delete(id); run.waiting--; if (this.pending.get(run.threadId) === run) run.heard(); }
+      if (answer === RESOLVED) return;                         // the agent withdrew the request: it expects no reply
+    }
+    // An object with `reply` is sent as it is, for the answers this table does not name (a policy amendment, say).
+    reply(answer && typeof answer === 'object' && answer.reply && typeof answer.reply === 'object' ? answer.reply : kind.reply(answer, p));
   }
 
   // Turns app-server notifications into ActivityEvents and settles the run.
@@ -255,6 +340,7 @@ export class CodexAppServerProvider {
       return;
     }
     run.batch.flush();
+    if (method === 'serverRequest/resolved') return void run.asking.get(p.requestId)?.settle(RESOLVED);
     if (method === 'item/started' && item.type === 'agentMessage' && !run.messages.has(item.id)) run.messages.set(item.id, item.phase === 'commentary' ? { commentary: true } : { commentary: false, segment: run.segments++ });
     if (method === 'turn/started') {
       run.turnId = p.turn?.id || run.turnId;
