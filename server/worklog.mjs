@@ -10,18 +10,27 @@
 // "while you were away" notice.
 //
 // Both are append-only JSON lines in private files. Neither records prompts or replies.
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync } from 'node:fs';
+import { closeSync, existsSync, fchmodSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { safeName } from './files.mjs';
 
 const count = list => Array.isArray(list) ? list.length : Number.isFinite(list) ? list : 0;
+// One line per entry, in one write. If the file ends part-way through a line (a process
+// died while writing it), the new entry starts on a line of its own, so only the broken
+// one is lost.
 function append(file, entry) {
   mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  const fresh = !existsSync(file);
-  appendFileSync(file, JSON.stringify(entry) + '\n', { mode: 0o600 });
-  if (fresh) chmodSync(file, 0o600);
+  const fd = openSync(file, 'a+', 0o600);
+  try {
+    const { size } = fstatSync(fd), last = Buffer.alloc(1);
+    if (!size) fchmodSync(fd, 0o600);
+    const torn = size > 0 && readSync(fd, last, 0, 1, size - 1) === 1 && last[0] !== 10;
+    writeSync(fd, (torn ? '\n' : '') + JSON.stringify(entry) + '\n');
+  } finally { closeSync(fd); }
 }
+// Moves a log that has reached its size aside, replacing the one rotation that is kept.
+function rotate(file, rotated, maxBytes) { if (existsSync(file) && statSync(file).size > maxBytes) renameSync(file, rotated); }
 function lines(file) {
   if (!existsSync(file)) return [];
   return readFileSync(file, 'utf8').split('\n').flatMap(line => { if (!line) return []; try { return [JSON.parse(line)]; } catch { return []; } });
@@ -68,7 +77,7 @@ export function createWorkLog({ file, maxBytes = 8 << 20, maxCode = 20000, now =
       ...(routine ? { routine: String(routine).slice(0, 64) } : {}), ...(label ? { label: String(label).slice(0, 200) } : {}),
       ...(what !== 'routine' && code !== undefined ? { code: String(code).slice(0, maxCode) } : {}), changed, ok: !!ok,
       ...(!ok ? { error: String(error ?? '').slice(0, 300) } : {}), ...(ms ? { ms } : {}), ...(source ? { source: String(source).slice(0, 20) } : {}) };
-    if (existsSync(file) && statSync(file).size > maxBytes) renameSync(file, rotated);
+    rotate(file, rotated, maxBytes);
     append(file, entry);
     return entry;
   }
@@ -126,7 +135,10 @@ export function shapeOf(code) {
     .replace(/`(?:\\[\s\S]|[^`\\])*`/g, '`T`')
     .replace(/'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/g, 'S')
     // A regular expression where a value can start (after ( , = : > and the like): its pattern is names too.
-    .replace(/([(,=:>[!&|?{;]\s*|\breturn\s+)\/(?![*/])(?:\\.|\[(?:\\.|[^\]])*\]|[^/\n\\])+\/[dgimsuy]*/g, '$1R')
+    // Each character can be matched one way only (a class opens with [ and nothing else may
+    // match one; inside it an escape is the only use of a backslash), so text that never
+    // closes its pattern is given up on in one pass.
+    .replace(/([(,=:>[!&|?{;]\s*|\breturn\s+)\/(?![*/])(?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\n\\[])+\/[dgimsuy]*/g, '$1R')
     .replace(/\b\d+(\.\d+)?\b/g, '0')
     .replace(/\s+/g, ' ')
     .trim();
@@ -165,11 +177,15 @@ export function suggestRoutines(entries, { routines = [], min = 3, limit = 20, s
 
 /**
  * The trail: what agents changed on a document while nobody had it open.
- * @param {{dir: string}} options each document's trail is `<dir>/<key>.trail.jsonl`
+ * @param {object} options
+ * @param {string} options.dir each document's trail is `<dir>/<key>.trail.jsonl`
+ * @param {number} [options.maxBytes] size at which a trail rotates; one rotation is kept beside it
+ *   as `<key>.trail.1.jsonl`. Default 8 MB
  */
-export function createTrail({ dir, now = () => Date.now() } = {}) {
+export function createTrail({ dir, maxBytes = 8 << 20, now = () => Date.now() } = {}) {
   if (typeof dir !== 'string' || !dir) throw new TypeError('Give the trail a directory.');
   const file = doc => path.join(dir, `${safeName(doc)}.trail.jsonl`);
+  const rotated = doc => path.join(dir, `${safeName(doc)}.trail.1.jsonl`);
   const keys = list => Array.isArray(list) ? list.map(r => typeof r === 'string' ? r : r?.key ?? r?.id).filter(k => typeof k === 'string').slice(0, 500) : [];
   return {
     /** Appends an entry when the run changed something; returns it, or null. `what` is one line saying what ran. */
@@ -177,10 +193,11 @@ export function createTrail({ dir, now = () => Date.now() } = {}) {
       const entry = { t: new Date(now()).toISOString(), source, what: String(what ?? '').replace(/\s+/g, ' ').trim().slice(0, 200), added: keys(changes?.added), updated: keys(changes?.updated), removed: keys(changes?.removed) };
       if (!ok) entry.error = String(error ?? '').slice(0, 200);
       if (!entry.added.length && !entry.updated.length && !entry.removed.length) return null;
+      rotate(file(doc), rotated(doc), maxBytes);
       append(file(doc), entry);
       return entry;
     },
-    /** Entries after `since` (see sinceMs), oldest first. */
-    read(doc, since) { const after = sinceMs(since, now()); return lines(file(doc)).filter(e => Date.parse(e.t) > after); },
+    /** Entries after `since` (see sinceMs), oldest first, from the trail and its rotation. */
+    read(doc, since) { const after = sinceMs(since, now()); return [...lines(rotated(doc)), ...lines(file(doc))].filter(e => Date.parse(e.t) > after); },
   };
 }
