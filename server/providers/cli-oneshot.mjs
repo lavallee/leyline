@@ -12,6 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { ProviderError, inputParts } from './contract.mjs';
 import { SHORT_NAME } from '../package-info.mjs';
+import { track, terminate } from '../children.mjs';
 
 export const ENV_KEYS = ['HOME', 'PATH', 'CODEX_HOME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'DBUS_SESSION_BUS_ADDRESS', 'XDG_RUNTIME_DIR', 'USER', 'SHELL', 'TERM'];
 const pick = keys => Object.fromEntries(keys.filter(k => process.env[k]).map(k => [k, process.env[k]]));
@@ -20,21 +21,36 @@ const pick = keys => Object.fromEntries(keys.filter(k => process.env[k]).map(k =
  * Runs a command with `input` on stdin and resolves with { code, stdout, stderr }.
  * Rejects with a ProviderError when it cannot start ('unavailable'), runs past `timeout`
  * ('timeout') or `signal` aborts ('stopped'). Output is capped so a runaway child cannot
- * fill memory.
+ * fill memory: past `maxOutput` characters the child is stopped, nothing more is kept, and
+ * the result carries `truncated: true` and the child's (non-zero) exit code.
+ * Stopping a child means SIGTERM and, if it is still running `killGrace` milliseconds
+ * later (default 2000), SIGKILL. Only the child itself is signalled: processes it started
+ * are its own to stop.
  */
-export function runProcess(command, args, { cwd, input = '', timeout = 300000, signal, env = pick(ENV_KEYS), maxOutput = 4_000_000 } = {}) {
+export function runProcess(command, args, { cwd, input = '', timeout = 300000, signal, env = pick(ENV_KEYS), maxOutput = 4_000_000, killGrace = 2000 } = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(new ProviderError('Stopped.', 'stopped'));
-    const child = spawn(command, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], shell: false });
-    let stdout = '', stderr = '', settled = false;
+    let child;
+    try { child = track(spawn(command, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], shell: false })); }
+    catch (error) { return reject(new ProviderError(`The agent could not start: ${String(error?.message || error).slice(0, 300)}`, 'unavailable')); }
+    let stdout = '', stderr = '', settled = false, truncated = false;
     const settle = (fn, value) => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); fn(value); };
-    const abort = () => { child.kill('SIGTERM'); settle(reject, new ProviderError('Stopped.', 'stopped')); };
+    const stop = error => { terminate(child, killGrace); settle(reject, error); };
+    const abort = () => stop(new ProviderError('Stopped.', 'stopped'));
     signal?.addEventListener('abort', abort, { once: true });
-    const timer = setTimeout(() => { child.kill('SIGTERM'); settle(reject, new ProviderError('The agent took too long and was stopped.', 'timeout')); }, timeout);
-    child.stdout.on('data', d => { stdout += d; if (stdout.length > maxOutput) child.kill('SIGTERM'); });
-    child.stderr.on('data', d => { stderr += d; if (stderr.length > 1_000_000) stderr = stderr.slice(-200_000); });
+    const timer = setTimeout(() => stop(new ProviderError('The agent took too long and was stopped.', 'timeout')), Math.min(Math.max(0, Number(timeout) || 0), 2 ** 31 - 1));
+    // Decoded as a stream, so a character split between two chunks is not broken.
+    child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+    child.stdout.on('data', d => {
+      if (settled) return;   // nothing is kept once the outcome is known, however long the child lingers
+      if (truncated) return;
+      stdout += d;
+      if (stdout.length > maxOutput) { truncated = true; terminate(child, killGrace); }
+    });
+    child.stderr.on('data', d => { if (settled) return; stderr += d; if (stderr.length > 1_000_000) stderr = stderr.slice(-200_000); });
+    child.stdout.on('error', () => {}); child.stderr.on('error', () => {});
     child.on('error', error => settle(reject, new ProviderError(`The agent could not start: ${error.message}`, 'unavailable')));
-    child.on('close', code => settle(resolve, { code, stdout, stderr }));
+    child.on('close', code => settle(resolve, { code, stdout, stderr, ...(truncated ? { truncated: true } : {}) }));
     child.stdin.on('error', () => {});
     child.stdin.end(input);
   });
@@ -63,7 +79,7 @@ export const PRESETS = {
     if (!await executable(config.bin)) throw new ProviderError('Configure the absolute path of the signed-in Codex CLI (bin).', 'unavailable');
     const dir = await mkdtemp(path.join(os.tmpdir(), `${SHORT_NAME}-`));
     try {
-      const login = await runProcess(config.bin, ['login', 'status'], { cwd: dir, timeout: 15000, env });
+      const login = await runProcess(config.bin, ['login', 'status'], { cwd: dir, timeout: 15000, signal, env });
       if (login.code !== 0) throw new ProviderError('Codex is not signed in on this host. Refresh its login.', 'auth');
       if (outputSchema) await writeFile(path.join(dir, 'schema.json'), JSON.stringify(outputSchema));
       const result = await runProcess(config.bin, ['-a', 'never', 'exec', '--sandbox', 'read-only', '--skip-git-repo-check',

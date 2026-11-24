@@ -134,3 +134,57 @@ test('runProcess caps runaway output', async () => {
   assert.ok(result.stdout.length < 2_000_000);
   assert.notEqual(result.code, 0);
 });
+
+const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const waitFor = async (check, ms = 3000) => { const end = Date.now() + ms; while (!check()) { if (Date.now() > end) throw new Error('Timed out waiting for a condition.'); await new Promise(r => setTimeout(r, 10)); } };
+
+test('a multi-byte character split between two writes is read whole', async () => {
+  const code = `const b = Buffer.from('日本語 naïve 🙂'); let i = 0; (function next() { if (i >= b.length) return; process.stdout.write(b.subarray(i, i + 1), () => setTimeout(next, 1)); process.stderr.write(b.subarray(i, i + 1)); i++; })();`;
+  const result = await runProcess(process.execPath, ['-e', code]);
+  assert.equal(result.stdout, '日本語 naïve 🙂');
+  assert.equal(result.stderr, '日本語 naïve 🙂');
+});
+
+test('a child that ignores SIGTERM is killed after a timeout or a stop, not left running', async t => {
+  const dir = await tempDir(t), pidFile = path.join(dir, 'pid');
+  const stubborn = `process.on('SIGTERM', () => {}); require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`;
+  const pid = async () => { let text = ''; await waitFor(() => { try { text = require_(pidFile); return !!text; } catch { return false; } }); return Number(text); };
+  const { readFileSync, rmSync } = await import('node:fs');
+  const require_ = file => readFileSync(file, 'utf8');
+  for (const how of ['timeout', 'stopped']) {
+    rmSync(pidFile, { force: true });
+    const controller = new AbortController();
+    const run = runProcess(process.execPath, ['-e', stubborn], { timeout: how === 'timeout' ? 400 : 60000, signal: controller.signal, killGrace: 100 });
+    run.catch(() => {});
+    const child = await pid();
+    t.after(() => { try { process.kill(child, 'SIGKILL'); } catch { /* gone, as it should be */ } });
+    if (how === 'stopped') controller.abort();
+    await assert.rejects(run, { code: how });
+    await waitFor(() => !alive(child), 3000);
+  }
+});
+
+test('output past the cap: nothing more is kept and the child is ended, even one that ignores SIGTERM', async () => {
+  const flood = `process.on('SIGTERM', () => {}); const chunk = 'x'.repeat(65536); (function next() { process.stdout.write(chunk, next); })();`;
+  const began = Date.now();
+  const result = await runProcess(process.execPath, ['-e', flood], { maxOutput: 200000, killGrace: 100, timeout: 5000 });
+  assert.equal(result.truncated, true);
+  assert.notEqual(result.code, 0);
+  assert.ok(result.stdout.length <= 200000 + 65536 * 2, `kept ${result.stdout.length} characters`);
+  assert.ok(Date.now() - began < 3000, `took ${Date.now() - began} ms`);
+});
+
+test('a command that cannot be started at all is unavailable, with a ProviderError', async () => {
+  await assert.rejects(runProcess('bad\0name', []), error => error.name === 'ProviderError' && error.code === 'unavailable');
+  await assert.rejects(runProcess(process.execPath, ['-e', '1'], { cwd: '/no/such/folder/anywhere' }), error => error.name === 'ProviderError' && error.code === 'unavailable');
+});
+
+test('codex preset: a stop during the login check is honoured at once', async t => {
+  const { bin } = await fakeCli(t, `if (args[0] === 'login') return setTimeout(() => process.exit(0), 5000); process.exit(0);`);
+  const provider = new CliOneshotProvider({ preset: 'codex', bin });
+  const controller = new AbortController(), began = Date.now();
+  const run = provider.run({ key: 'k', input: 'x', signal: controller.signal });
+  setTimeout(() => controller.abort(), 150);
+  await assert.rejects(run, { code: 'stopped' });
+  assert.ok(Date.now() - began < 2000, `took ${Date.now() - began} ms`);
+});
