@@ -25,7 +25,38 @@ export class ProposalError extends Error {
 
 export const FATES = ['applied', 'stale', 'undone', 'dismissed'];
 const text = (value, max) => typeof value === 'string' && value.length <= max && !value.includes('\0');
-const count = (body, needle) => { let n = 0; for (let at = body.indexOf(needle); at >= 0; at = body.indexOf(needle, at + 1)) n++; return n; };
+
+// Where `needle` occurs in `body`: the first two places at most, which is all that is
+// needed to tell "once" from "more than once". The text comes from a model and the search
+// must not be able to run away: the engine's own search is quick on ordinary text but can
+// take time proportional to both lengths multiplied (seconds for a long needle in a large
+// document of repeating text), so a needle longer than SHORT is found with a search whose
+// time is bounded by the two lengths added (Knuth, Morris and Pratt).
+const SHORT = 256;
+export function occurrences(body, needle, limit = 2) {
+  const found = [], m = needle.length;
+  if (!m || m > body.length) return found;
+  if (m <= SHORT) {
+    for (let at = body.indexOf(needle); at >= 0 && found.push(at) < limit; at = body.indexOf(needle, at + 1));
+    return found;
+  }
+  const fail = new Int32Array(m);
+  for (let i = 1, k = 0; i < m; i++) {
+    const c = needle.charCodeAt(i);
+    while (k > 0 && c !== needle.charCodeAt(k)) k = fail[k - 1];
+    if (c === needle.charCodeAt(k)) k++;
+    fail[i] = k;
+  }
+  for (let i = 0, k = 0, n = body.length; i < n; i++) {
+    const c = body.charCodeAt(i);
+    while (k > 0 && c !== needle.charCodeAt(k)) k = fail[k - 1];
+    if (c === needle.charCodeAt(k)) k++;
+    if (k === m) { if (found.push(i - m + 1) >= limit) break; k = fail[k - 1]; }
+  }
+  return found;
+}
+// The place the last check found, so that applying the edit it allowed does not search again.
+let located = null;
 
 /**
  * The built-in kind: replace `find` with `replace` in `file`. The document is a map of
@@ -39,16 +70,19 @@ export const textEdit = {
   },
   /** Null when the edit can be applied to this document, or why it cannot: { code, problem }. */
   check(edit, doc) {
-    const body = doc?.[edit.file];
+    const body = doc && Object.hasOwn(doc, edit.file) ? doc[edit.file] : undefined;
     if (typeof body !== 'string') return { code: 'unknown-file', problem: `${edit.file} is not part of this document (files: ${Object.keys(doc ?? {}).join(', ')}).` };
     if (edit.find === edit.replace) return { code: 'no-change', problem: 'Nothing changes.' };
-    const n = edit.find ? count(body, edit.find) : 0;
-    if (n === 0) return { code: 'not-found', problem: 'The text to replace is not in the document.' };
-    if (n > 1) return { code: 'ambiguous', problem: 'The text to replace occurs more than once.' };
+    const places = edit.find ? occurrences(body, edit.find) : [];
+    if (!places.length) return { code: 'not-found', problem: 'The text to replace is not in the document.' };
+    if (places.length > 1) return { code: 'ambiguous', problem: 'The text to replace occurs more than once.' };
+    located = { body, find: edit.find, at: places[0] };
     return null;
   },
   apply(edit, doc) {
-    const body = doc[edit.file], at = body.indexOf(edit.find);
+    const body = doc[edit.file];
+    const at = located && located.body === body && located.find === edit.find ? located.at : occurrences(body, edit.find, 1)[0];
+    located = null;
     return { ...doc, [edit.file]: body.slice(0, at) + edit.replace + body.slice(at + edit.find.length) };
   },
   invert: edit => ({ ...edit, find: edit.replace, replace: edit.find }),

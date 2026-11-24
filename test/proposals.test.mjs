@@ -152,3 +152,45 @@ test('a host adds its own kind of edit; the document is opaque to the rest', () 
   assert.equal(mixed.make(t, { kind: 'shape', id: 'box1', text: 'Third' }, canvas).code, 'full');
   assert.throws(() => mixed.state({ kind: 'nope' }, canvas), ProposalError);
 });
+
+// ---------------------------------------------------------------- hardening
+
+test('text an agent supplies cannot make the search run away, whatever its shape', () => {
+  const body = 'a'.repeat(1_000_000), doc = { 'a.md': body };
+  const cases = [['a', 'ambiguous'], ['a'.repeat(2000), 'ambiguous'], ['a'.repeat(50000) + 'b' + 'a'.repeat(49999), 'not-found'], ['b' + 'a'.repeat(99999), 'not-found'], ['a'.repeat(99999) + 'b', 'not-found']];
+  for (const [find, code] of cases) {
+    const began = performance.now();
+    assert.equal(textEdit.check({ file: 'a.md', find, replace: 'z' }, doc)?.code, code);
+    assert.ok(performance.now() - began < 1500, `${find.length} characters took ${Math.round(performance.now() - began)} ms`);
+  }
+});
+
+test('long finds are located exactly: once, twice, at either end, overlapping, with astral characters', () => {
+  let state = 7; const next = () => { state = (state * 1664525 + 1013904223) >>> 0; return state / 2 ** 32; };
+  const alphabet = ['a', 'b', 'ab', '🙂', 'é', '\n'];
+  for (let round = 0; round < 300; round++) {
+    const piece = () => alphabet[Math.floor(next() * alphabet.length)];
+    let body = ''; for (let i = 0; i < 400 + next() * 2000; i++) body += piece();
+    const at = Math.floor(next() * (body.length - 300)), find = body.slice(at, at + 260 + Math.floor(next() * 40));
+    const expected = []; for (let i = body.indexOf(find); i >= 0 && expected.length < 2; i = body.indexOf(find, i + 1)) expected.push(i);
+    const trouble = textEdit.check({ file: 'f', find, replace: 'Z' }, { f: body });
+    assert.equal(trouble?.code ?? 'ok', expected.length > 1 ? 'ambiguous' : 'ok', `round ${round}`);
+    if (!trouble) assert.equal(textEdit.apply({ file: 'f', find, replace: 'Z' }, { f: body }).f, body.slice(0, expected[0]) + 'Z' + body.slice(expected[0] + find.length));
+  }
+  const long = 'x'.repeat(300);
+  assert.equal(textEdit.check({ file: 'f', find: long, replace: '' }, { f: `${long}y` }), null);
+  assert.equal(textEdit.check({ file: 'f', find: long, replace: '' }, { f: `y${long}` }), null);
+  assert.equal(textEdit.check({ file: 'f', find: long, replace: '' }, { f: `${long}x` }).code, 'ambiguous', 'overlapping occurrences count');
+  assert.equal(textEdit.check({ file: 'f', find: long, replace: '' }, { f: long.slice(1) }).code, 'not-found');
+});
+
+test('file names that are also Object properties are just file names', () => {
+  const p = createProposals(), t = { id: 't' };
+  for (const file of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+    assert.equal(p.make(t, { file, find: 'a', replace: 'b' }, { 'real.md': 'a' }).code, 'unknown-file', file);
+    const made = p.make(t, { file, find: 'a', replace: 'b' }, Object.fromEntries([[file, 'a']]));
+    assert.equal(made.ok, true, file);
+    assert.equal(Object.getOwnPropertyDescriptor(made.doc, file)?.value, 'b', file);
+  }
+  assert.equal(({}).polluted, undefined);
+});
