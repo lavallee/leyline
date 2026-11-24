@@ -11,7 +11,7 @@
 //   user's own Codex configuration are switched off for these threads.
 import { mkdir } from 'node:fs/promises';
 import { CodexRpc } from '../codex-rpc.mjs';
-import { ProviderError, inputParts } from './contract.mjs';
+import { ProviderError, createBatcher, inputParts } from './contract.mjs';
 import { SHORT_NAME } from '../package-info.mjs';
 
 const ZERO = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 };
@@ -27,7 +27,7 @@ export const commandLine = command => (Array.isArray(command) ? command.join(' '
 
 export class CodexAppServerProvider {
   name = 'codex-app-server';
-  capabilities = { activity: true, textStream: false, sessions: true, cancel: true, shell: true, structuredOutput: true };
+  capabilities = { activity: true, textStream: true, sessions: true, cancel: true, shell: true, structuredOutput: true };
 
   /**
    * @param {object} options
@@ -48,13 +48,16 @@ export class CodexAppServerProvider {
    * @param {number} [options.killGrace] milliseconds close() waits after SIGTERM before SIGKILL; default 2000
    * @param {number} [options.maxLine] characters in one line from the child; longer lines are dropped. Default 64 MB
    * @param {boolean} [options.processGroup] stop what the child started along with it; see CodexRpc. Default false
+   * @param {{ms?: number, chars?: number}} [options.streamBatch] how streamed text is gathered before it is passed on: for
+   *   up to `ms` milliseconds or until `chars` characters are waiting. Default { ms: 40, chars: 400 }; `ms: 0` passes on
+   *   every delta as it arrives.
    */
   constructor({ command = ['codex', 'app-server'], workDir, clientInfo = { name: SHORT_NAME }, serviceName, env = process.env,
-    dropEnv = ['OPENAI_API_KEY'], disableUserExtensions = true, threadConfig = {}, model, onApproval, onStderr, stopGrace = 10000, killGrace = 2000, maxLine, processGroup = false } = {}) {
+    dropEnv = ['OPENAI_API_KEY'], disableUserExtensions = true, threadConfig = {}, model, onApproval, onStderr, stopGrace = 10000, killGrace = 2000, maxLine, processGroup = false, streamBatch } = {}) {
     if (!Array.isArray(command) || !command.length || command.some(part => typeof part !== 'string' || !part || part.includes('\0')))
       throw new ProviderError('The app-server command must be a list of non-empty strings.', 'config');
     if (typeof workDir !== 'string' || !workDir) throw new ProviderError('Give the app-server a working folder (workDir).', 'config');
-    Object.assign(this, { command, workDir, serviceName: serviceName || clientInfo.name, disableUserExtensions, threadConfig, fixedModel: model, onStderr, stopGrace, killGrace, maxLine, processGroup });
+    Object.assign(this, { command, workDir, serviceName: serviceName || clientInfo.name, disableUserExtensions, threadConfig, fixedModel: model, onStderr, stopGrace, killGrace, maxLine, processGroup, streamBatch });
     this.clientInfo = { name: clientInfo.name, title: clientInfo.title || clientInfo.name, version: clientInfo.version || '0.0.0' };
     this.env = Object.fromEntries(Object.entries(env).filter(([name]) => !dropEnv.includes(name)));
     this.onApproval = onApproval || (() => ({ decision: 'decline' }));
@@ -121,8 +124,13 @@ export class CodexAppServerProvider {
    * @param {string} [request.model] a model for this run, instead of the provider's
    * @param {number} [request.idleTimeout] milliseconds without any word from the agent about this run after which
    *   it is stopped with code 'timeout', as when `timeout` passes. Default: none
+   * @param {(piece: string, at: {segment: number}) => void} [request.onText] the reply as it is written. Messages the
+   *   agent marks as commentary are not passed here; they arrive through onEvent as an "Agent note" that grows.
+   * @param {boolean} [request.streamOutput] also pass on a command's output while it runs, as `append` events on the
+   *   command's activity item (the item then holds the output as it came, instead of only its tail at the end).
+   *   Default false, so a host's activity list is unchanged unless it asks.
    */
-  async run({ key, instructions, input, effort = 'low', sandbox = {}, outputSchema, threadConfig, model: asked, onEvent = () => {}, signal, timeout = 900000, idleTimeout } = {}) {
+  async run({ key, instructions, input, effort = 'low', sandbox = {}, outputSchema, threadConfig, model: asked, onEvent = () => {}, onText, streamOutput = false, signal, timeout = 900000, idleTimeout } = {}) {
     if (typeof key !== 'string' || !key) throw new ProviderError('Give the run a conversation key.', 'config');
     const parts = inputParts(input);
     if (!parts.length) throw new ProviderError('Give the run some input.', 'config');
@@ -163,18 +171,20 @@ export class CodexAppServerProvider {
       }
       if (signal?.aborted) throw new ProviderError('Stopped.', 'stopped');
       if (this.rpc !== rpc) throw new ProviderError('The agent connection was closed.', 'unavailable');
-      return this.turn({ rpc, key, threadId, cwd, parts, effort, policy, outputSchema, model, asked, onEvent, signal, timeout, idleTimeout });
+      return this.turn({ rpc, key, threadId, cwd, parts, effort, policy, outputSchema, model, asked, onEvent, onText, streamOutput, signal, timeout, idleTimeout });
     } finally { this.starting.delete(key); signal?.removeEventListener('abort', halt); }
   }
 
   // Starts the turn and returns the promise that settles when it ends. The run is in
   // `pending` before this returns, so the key stays taken without a gap.
-  turn({ rpc, key, threadId, cwd, parts, effort, policy, outputSchema, model, asked, onEvent, signal, timeout, idleTimeout }) {
+  turn({ rpc, key, threadId, cwd, parts, effort, policy, outputSchema, model, asked, onEvent, onText, streamOutput, signal, timeout, idleTimeout }) {
     return new Promise((resolve, reject) => {
       const abort = () => this.cancel(key);
       const run = { key, threadId, model: asked, text: '', turnId: null, cancelled: false, onEvent, parts: new Set(), usageStart: this.totals.get(threadId) || ZERO,
+        onText: typeof onText === 'function' ? onText : null, streamOutput: !!streamOutput, batch: createBatcher(this.streamBatch), messages: new Map(), segments: 0, streamed: new Set(),
         finish: (error, result) => {
           if (this.pending.get(threadId) !== run) return;
+          run.batch.flush();                                     // text still being gathered goes out before the result
           clearTimeout(run.timer); clearTimeout(run.grace); clearTimeout(run.idle); signal?.removeEventListener('abort', abort); this.pending.delete(threadId);
           error ? reject(error) : resolve(result);
         } };
@@ -228,6 +238,24 @@ export class CodexAppServerProvider {
     run.heard?.();
     const emit = event => { try { run.onEvent(event); } catch { /* a host's handler must not break the run */ } };
     const item = p.item && typeof p.item === 'object' ? p.item : {};
+    // Streamed text is gathered for a moment before it is passed on; anything else about
+    // the run goes out after the text that came before it.
+    if (method === 'item/agentMessage/delta' || method === 'item/commandExecution/outputDelta') {
+      const id = p.itemId, delta = words(p.delta);
+      if ((typeof id !== 'string' && typeof id !== 'number') || !delta) return;
+      if (method === 'item/commandExecution/outputDelta') {
+        if (!run.streamOutput) return;
+        run.streamed.add(id);
+        return run.batch.add(`output:${id}`, delta, piece => emit({ id, kind: 'activity', append: piece, status: 'running' }));
+      }
+      let message = run.messages.get(id);
+      if (!message) run.messages.set(id, message = { commentary: false, segment: run.segments++ });
+      if (message.commentary) return run.batch.add(`note:${id}`, delta, piece => emit({ id, kind: 'activity', title: 'Agent note', append: piece, status: 'running' }));
+      if (run.onText) run.batch.add(`text:${id}`, delta, piece => run.onText(piece, { segment: message.segment }));
+      return;
+    }
+    run.batch.flush();
+    if (method === 'item/started' && item.type === 'agentMessage' && !run.messages.has(item.id)) run.messages.set(item.id, item.phase === 'commentary' ? { commentary: true } : { commentary: false, segment: run.segments++ });
     if (method === 'turn/started') {
       run.turnId = p.turn?.id || run.turnId;
       if (run.cancelled && run.turnId) this.interrupt(run);
@@ -251,7 +279,8 @@ export class CodexAppServerProvider {
           run.text = words(item.text);
         }
       } else if (item.type === 'commandExecution') emit({ id: item.id, kind: 'activity', command: commandLine(Array.isArray(item.command) ? item.command.map(String) : words(item.command)), status,
-        ...(done ? { output: words(item.aggregatedOutput).slice(-1500) } : {}) });
+        // Output that was passed on as it came is already in the item.
+        ...(done && !run.streamed.has(item.id) ? { output: words(item.aggregatedOutput).slice(-1500) } : {}) });
       else if (item.type === 'fileChange') emit({ id: item.id, kind: 'activity', paths: (Array.isArray(item.changes) ? item.changes : []).map(c => c?.path).filter(path => typeof path === 'string'), status });
       else if (item.type === 'webSearch') emit({ id: item.id, kind: 'activity', title: 'Searching the web', text: words(item.query), status });
       else if (item.type === 'plan') emit({ id: item.id, kind: 'activity', title: 'Plan', text: words(item.text), status });

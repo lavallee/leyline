@@ -18,7 +18,9 @@
 //   input         a string, or a list of strings sent as separate parts of one message
 //   instructions  standing instructions (a system prompt), where the provider has a place for them
 //   onEvent       called with each ActivityEvent
-//   onText        called with pieces of the reply as they arrive (only where `textStream`)
+//   onText        called as onText(piece, { segment }) with pieces of the reply as they arrive (only where
+//                 `textStream`). `segment` counts the agent's messages within the turn: when it changes, a
+//                 new message has begun and what came before was a note along the way.
 //   signal        an AbortSignal; aborting rejects with a ProviderError whose code is 'stopped'
 //   timeout       milliseconds
 //
@@ -93,3 +95,31 @@ export function assertProvider(provider) {
 }
 
 export const inputParts = input => (Array.isArray(input) ? input : [input]).filter(part => typeof part === 'string' && part.length);
+
+/**
+ * Gathers small pieces of streamed text into larger ones, so that a consumer sees a few
+ * events a second instead of one per token. Pieces added under the same key are joined
+ * and handed to that key's `deliver` together, after `ms` milliseconds or as soon as
+ * `chars` characters are waiting. `flush()` hands over everything now: call it before
+ * reporting anything that must come after the text already received.
+ * @param {{ms?: number, chars?: number}} [options] default 40 ms and 400 characters; `ms: 0` passes every piece straight through
+ */
+export function createBatcher({ ms = 40, chars = 400 } = {}) {
+  const held = new Map();
+  let timer = null, size = 0;
+  const flush = () => {
+    clearTimeout(timer); timer = null; size = 0;
+    for (const [key, entry] of [...held]) { held.delete(key); try { entry.deliver(entry.text); } catch { /* a consumer must not break the stream */ } }
+  };
+  return {
+    add(key, text, deliver) {
+      if (typeof text !== 'string' || !text) return;
+      if (!(ms > 0)) { try { deliver(text); } catch { /* as above */ } return; }
+      const entry = held.get(key);
+      if (entry) entry.text += text; else held.set(key, { text, deliver });
+      size += text.length;
+      if (size >= chars) flush(); else if (!timer) { timer = setTimeout(flush, ms); timer.unref?.(); }
+    },
+    flush,
+  };
+}

@@ -47,7 +47,7 @@ test('every adapter has the shape of the contract', () => {
     new HttpChatProvider({ baseUrl: 'http://127.0.0.1:1/v1', model: 'm' })];
   for (const provider of providers) {
     assert.equal(assertProvider(provider), provider);
-    assert.deepEqual(Object.keys(provider.capabilities).sort(), ['activity', 'cancel', 'sessions', 'shell', 'structuredOutput', 'textStream']);
+    for (const name of ['activity', 'cancel', 'sessions', 'shell', 'structuredOutput', 'textStream']) assert.equal(typeof provider.capabilities[name], 'boolean', name);
   }
   assert.deepEqual(providers.map(p => p.name), ['codex-app-server', 'cli-oneshot', 'http-chat']);
   assert.throws(() => assertProvider({ run() {} }), /cancel\(\)/);

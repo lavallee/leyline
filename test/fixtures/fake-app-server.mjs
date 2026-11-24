@@ -52,6 +52,23 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     }
     if (text.includes('die')) return process.exit(1);
     if (text.includes('fail')) return note('error', { threadId, willRetry: false, error: { message: 'The model is unavailable.' } });
+    if (text.includes('stream')) {
+      // A reply written piece by piece, with a note before it and a command whose output arrives as it runs.
+      note('item/started', { threadId, item: { id: 'n1', type: 'agentMessage', phase: 'commentary', text: '' } });
+      for (const delta of ['Looking ', 'first.']) note('item/agentMessage/delta', { threadId, turnId, itemId: 'n1', delta });
+      note('item/completed', { threadId, item: { id: 'n1', type: 'agentMessage', phase: 'commentary', text: 'Looking first.' } });
+      note('item/started', { threadId, item: { id: 'x1', type: 'commandExecution', command: 'make test' } });
+      for (const delta of ['compiling\n', 'testing\n', { not: 'text' }, 'ok\n']) note('item/commandExecution/outputDelta', { threadId, turnId, itemId: 'x1', delta });
+      note('item/completed', { threadId, item: { id: 'x1', type: 'commandExecution', command: 'make test', exitCode: 0, aggregatedOutput: 'compiling\ntesting\nok\n' } });
+      note('item/started', { threadId, item: { id: 's1', type: 'agentMessage', phase: null, text: '' } });
+      for (const delta of ['Half', 'way ', 'there.']) note('item/agentMessage/delta', { threadId, turnId, itemId: 's1', delta });
+      note('item/completed', { threadId, item: { id: 's1', type: 'agentMessage', text: 'Halfway there.' } });
+      for (const delta of ['The ', 'tests ', 'pass.']) note('item/agentMessage/delta', { threadId, turnId, itemId: 's2', delta });   // no item/started: the delta is the first word of it
+      note('item/agentMessage/delta', { threadId, turnId, itemId: null, delta: 'dropped' });
+      note('item/completed', { threadId, item: { id: 's2', type: 'agentMessage', text: 'The tests pass.' } });
+      note('thread/tokenUsage/updated', { threadId, turnId, tokenUsage: { total: { totalTokens: 15, inputTokens: 10, cachedInputTokens: 0, outputTokens: 5, reasoningOutputTokens: 0 }, last: {} } });
+      return note('turn/completed', { threadId, turn: { id: turnId, status: 'completed' } });
+    }
     if (text.includes('approve')) send({ id: 9000 + seq, method: 'item/commandExecution/requestApproval', params: { threadId, command: 'rm -rf /' } });
     note('item/started', { threadId, item: { id: 'r1', type: 'reasoning' } });
     note('item/reasoning/summaryTextDelta', { threadId, itemId: 'r1', summaryIndex: 0, delta: 'Reading' });
