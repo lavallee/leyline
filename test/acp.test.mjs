@@ -293,6 +293,8 @@ test('a second run on a busy key is refused; an agent that ignores a stop loses 
 
 test('a run past its overall or idle timeout is stopped and its session dropped', async t => {
   const { provider, received } = await setup(t);
+  // The session exists before the clock starts: a run that times out while its agent is still starting has no turn to cancel.
+  await provider.run({ key: 'a', input: 'first' });
   await assert.rejects(provider.run({ key: 'a', input: 'hang', timeout: 150 }), { code: 'timeout', message: 'The request ran out of time and was stopped.' });
   assert.equal((await provider.run({ key: 'a', input: 'next' })).message, 'turn 1: next', 'a fresh session after a timeout');
   const started = Date.now();
