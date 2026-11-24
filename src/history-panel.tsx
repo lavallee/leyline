@@ -37,6 +37,9 @@ export type HistoryWords = {
 	empty: string
 	/** The restore button. */
 	restore: (n: number) => string
+	/** Beside "Now", when it is the latest version and when it has changed since. */
+	now?: string
+	nowChanged?: string
 }
 const WORDS: HistoryWords = {
 	document: 'canvas',
@@ -217,7 +220,7 @@ export function HistoryPanel({ loadVersions, readVersion, restoreVersion, saveVe
 					<li>
 						<button type="button" onClick={() => setSelected(null)} aria-current={selected === null} className={cn('flex w-full items-baseline gap-2 px-3 py-1.5 text-left outline-none hover:bg-muted focus-visible:bg-muted', selected === null && 'bg-muted')}>
 							<span className="font-medium">Now</span>
-							<span className="text-xs text-muted-foreground">{current ? `the live ${w.document}` : `the live ${w.document}, with unsaved edits`}</span>
+							<span className="text-xs text-muted-foreground">{current ? w.now ?? `the live ${w.document}` : w.nowChanged ?? `the live ${w.document}, with unsaved edits`}</span>
 						</button>
 					</li>
 					{versions === null && <li className="px-3 py-2 text-xs text-muted-foreground">Loading…</li>}

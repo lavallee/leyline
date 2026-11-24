@@ -51,3 +51,13 @@ Copycat's live page sit behind the same History panel.
 4. Skein, when it next changes its chrome.
 
 The first three each end with the host's own tests and a look in a browser.
+
+## A host in a shadow root
+
+Copycat draws the shell and the chat inside shadow roots, so a page's styles cannot reach
+them. Tailwind v4 gives its utilities' variables their starting values with `@property`,
+which browsers ignore inside a shadow root: `border-b` then has no border style and
+`shadow-lg` no shadow. Such a host applies Tailwind's own fallback block (the one under
+`@supports` in `@layer properties`) unconditionally, to `:host` and every element; see
+Copycat's `scripts/build-chat.js`. Popovers opened from the strip render in the node the
+host passes as `container`.
