@@ -53,7 +53,9 @@ export const fileNameFor = key => `${SAFE_KEY.test(key) ? key : createHash('sha2
  * @param {number} [options.maxTurns] default 200
  * @param {number} [options.maxActivities] per turn; default 200
  * @param {number} [options.saveDelay] milliseconds activity writes are batched for; default 600
- * @param {object} [options.messages] wording overrides; see MESSAGES in this file
+ * @param {object} [options.messages] wording overrides; see MESSAGES in this file. `interrupted`,
+ *   `removed` and `stopped` may each be a function of the turn, for a host whose wording
+ *   depends on the kind of request (what a stopped request leaves behind, say).
  * @param {(error: Error, turn: object) => string} [options.describeFailure] the message stored on a failed turn
  * @param {(event: object, item: object) => object|void} [options.describeActivity] rewords an activity before it is stored
  * @param {(lane: object, turn: object) => void} [options.onLaneClosed] after a lane finishes: the place to reset a side lane's agent
@@ -65,6 +67,8 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
   if (typeof dir !== 'string' || !dir) throw new TypeError('Give the store a directory.');
   if (typeof run !== 'function') throw new TypeError('Give the store a run(turn, lane, signal, tools) function.');
   const words = { ...MESSAGES, ...messages };
+  // The wording for something that happened to a turn: a string, or a function of the turn.
+  const say = (name, turn) => { const word = words[name]; return typeof word === 'function' ? guard(() => word(turn)) || MESSAGES[name] : word; };
   const conversations = new Map();  // key -> conversation
   const loading = new Map();        // key -> Promise<conversation>
   const queues = new Map();         // key -> [{ turn, payload }]
@@ -102,7 +106,7 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
         if (read && Array.isArray(read.turns) && (read.key === key || read.key === undefined)) stored = { ...read, key };
       } catch { /* none yet, or unreadable: start empty and leave the file for the next write */ }
       for (const turn of stored.turns) if (turn.status === 'running' || turn.status === 'queued') {
-        Object.assign(turn, { status: 'failed', message: words.interrupted, finishedAt: turn.finishedAt || now() });
+        Object.assign(turn, { status: 'failed', message: say('interrupted', turn), finishedAt: turn.finishedAt || now() });
         settleActivity(turn.activities ||= [], false); recovered = true;
       }
       conversations.set(key, stored); loading.delete(key);
@@ -162,14 +166,14 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
     try {
       await persist(conversation);
       result = await run(turn, lane, controller.signal, { payload, conversation, activity, save });
-      if (controller.signal.aborted) throw new Error(words.stopped);
+      if (controller.signal.aborted) throw new Error(MESSAGES.stopped);
       const { id, status, activities, ...fields } = result && typeof result === 'object' ? result : {};
       Object.assign(turn, fields, { status: 'succeeded', message: typeof fields.message === 'string' ? fields.message : '' });
     } catch (error) {
       failure = error;
       const stopped = controller.signal.aborted;
       turn.status = stopped ? 'stopped' : 'failed';
-      turn.message = stopped ? words.stopped : guard(() => describeFailure(error, turn)) || 'The request could not be completed.';
+      turn.message = stopped ? say('stopped', turn) : guard(() => describeFailure(error, turn)) || 'The request could not be completed.';
     }
     runtime.done = true;
     clearTimeout(runtime.timer); runtime.timer = null;
@@ -194,7 +198,7 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
     if (found.status === 'queued') {
       const queue = queues.get(key) || [], at = queue.findIndex(q => q.turn === found);
       if (at >= 0) queue.splice(at, 1);
-      Object.assign(found, { status: 'stopped', message: words.removed, finishedAt: now() });
+      Object.assign(found, { status: 'stopped', message: say('removed', found), finishedAt: now() });
       await persist(conversation);
     } else if (found.status === 'running') lanesOf(key).find(r => r.turn === found)?.controller.abort();
     return found;
@@ -238,7 +242,7 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
     flush: () => writes,
     /** Aborts everything running, drops what is waiting, and waits for the last write. */
     async close() {
-      for (const [key, queue] of queues) { for (const { turn: t } of queue) Object.assign(t, { status: 'stopped', message: words.removed, finishedAt: now() }); queues.delete(key); }
+      for (const [key, queue] of queues) { for (const { turn: t } of queue) Object.assign(t, { status: 'stopped', message: say('removed', t), finishedAt: now() }); queues.delete(key); }
       const active = [...running.values()];
       for (const r of active) r.controller.abort();
       const until = Date.now() + 2000;

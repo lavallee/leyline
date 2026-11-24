@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.1 (2026-11-23)
+
+Found while moving Copycat's server onto the package.
+
+Added:
+
+- `./server/conversations`: the `messages` entries `stopped`, `removed` and `interrupted`
+  may each be a function of the turn. Copycat keeps two kinds of request in one
+  conversation (a one-shot agent that only proposes, and a live agent that edits as it
+  goes), and what a stopped request leaves behind differs between them. A plain string
+  works as before; a function that returns nothing falls back to the library's sentence.
+
+Unchanged: every 0.4.0 export path and signature, and the UI.
+
 ## 0.4.0 (2026-11-23)
 
 The package widens from the chat panel to the patterns around it. `docs/patterns.md` is

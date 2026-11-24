@@ -152,6 +152,27 @@ test('stop: a waiting request is removed, a running one is aborted, and both are
   await assert.rejects(store.stop('k', 'no-such-turn'), { code: 'not-found', status: 404 });
 });
 
+test('wording that depends on the turn: stopped, removed and interrupted can be functions of it', async t => {
+  const dir = await tempDir(t);
+  await writeFile(path.join(dir, fileNameFor('old')), JSON.stringify({ key: 'old', turns: [{ id: 'a', user: 'x', status: 'running', live: true, activities: [] }, { id: 'b', user: 'y', status: 'queued', activities: [] }] }));
+  const store = createConversationStore({ dir, maxLanes: 1, run: (turn, lane, signal) => new Promise((resolve, reject) => { const stop = () => reject(new Error('aborted')); if (signal.aborted) stop(); else signal.addEventListener('abort', stop); }),
+    messages: { stopped: turn => turn.live ? 'Stopped. What it changed is kept.' : 'Stopped. Nothing was changed.', removed: turn => `Removed “${turn.user}”.`,
+      interrupted: turn => turn.live ? 'Restarted mid-edit.' : null } });
+  const live = await store.send('k', { user: 'one', live: true }), waiting = await store.send('k', { user: 'two' });
+  await until(() => live.status === 'running');
+  await store.stop('k', waiting.id);
+  assert.equal(waiting.message, 'Removed “two”.');
+  await store.stop('k', live.id); await settled(live);
+  assert.equal(live.message, 'Stopped. What it changed is kept.');
+  const plain = await store.send('k', { user: 'three' });
+  await until(() => plain.status === 'running');
+  await store.stop('k', plain.id); await settled(plain);
+  assert.equal(plain.message, 'Stopped. Nothing was changed.');
+  // A function that returns nothing falls back to the library's own sentence.
+  const old = await store.open('old');
+  assert.deepEqual(old.turns.map(turn => turn.message), ['Restarted mid-edit.', 'The server restarted before this request finished. It is kept; send it again to continue.']);
+});
+
 test('a run that ignores its signal is still recorded as stopped, and a late reply is dropped', async t => {
   const gate = deferred();
   const store = createConversationStore({ dir: await tempDir(t), run: async () => { await gate.promise; return { message: 'too late' }; } });

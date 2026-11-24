@@ -289,7 +289,8 @@ await store.reset('page-42');             // archives the old turns first
 - `reset` copies the old turns to `archive/` and refuses while anything is running.
 - `store.running(laneId)` returns the turn at work in a lane. A host's command route
   uses it to find which turn an agent's command belongs to.
-- All wording can be replaced through `messages`.
+- All wording can be replaced through `messages`. `stopped`, `removed` and `interrupted`
+  may each be a function of the turn, for a host with more than one kind of request.
 
 ## Commands
 
@@ -650,7 +651,7 @@ npm pack --pack-destination /path/to/consumer/vendor
 Then in the consumer:
 
 ```sh
-npm install ./vendor/lyra-forge-agent-chat-0.4.0.tgz
+npm install ./vendor/lyra-forge-agent-chat-0.4.1.tgz
 ```
 
 and write `vendor/agent-chat.json`:
@@ -658,11 +659,11 @@ and write `vendor/agent-chat.json`:
 ```json
 {
   "name": "@lyra-forge/agent-chat",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "source": "<where this repository lives>",
   "revision": "<git rev-parse HEAD>",
   "directory": ".",
-  "artifact": "lyra-forge-agent-chat-0.4.0.tgz",
+  "artifact": "lyra-forge-agent-chat-0.4.1.tgz",
   "integrity": "sha512-<base64 sha512 of the tarball>"
 }
 ```
