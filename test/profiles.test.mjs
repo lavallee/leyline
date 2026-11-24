@@ -127,3 +127,39 @@ test('bindings say which agent a document has', async t => {
   assert.throws(() => bindings.bind('canvas-1', 'not a ref'), ProfileError);
   assert.throws(() => createBindings({}), TypeError);
 });
+
+// ---------------------------------------------------------------- hardening
+
+test('one unreadable profile file does not hide the others', async t => {
+  const { root, work } = await agentFolder(t), dir = path.join(root, 'profiles');
+  await mkdir(dir);
+  await writeFile(path.join(dir, 'good.json'), JSON.stringify({ name: 'Good', workdir: work }));
+  await writeFile(path.join(dir, 'broken.json'), '{ "name": "Half');
+  await writeFile(path.join(dir, 'list.json'), '[1, 2]');
+  const { profiles, errors } = await createProfiles({ dir, home: root }).list();
+  assert.deepEqual(profiles.map(p => p.id), ['good'], 'the good one is still offered');
+  assert.deepEqual(errors.map(e => e.source), ['local', 'local'], 'and each bad file is reported');
+  assert.ok(errors.some(e => e.error.includes('broken.json')));
+  assert.deepEqual(fileSource(dir).problems().map(p => p.id).sort(), ['broken', 'list']);
+});
+
+test('bindings: document names that are also Object properties bind and unbind like any other', async t => {
+  const bindings = createBindings({ file: path.join(await tempDir(t), 'bindings.json') });
+  for (const doc of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+    assert.equal(bindings.bound(doc), null, `${doc} starts unbound`);
+    assert.deepEqual(bindings.bind(doc, 'local/kiefer'), { was: null, now: 'local/kiefer', changed: true });
+    assert.equal(bindings.bound(doc), 'local/kiefer');
+    assert.equal(bindings.unbind(doc).changed, true);
+    assert.equal(bindings.bound(doc), null);
+  }
+  assert.equal(({}).polluted, undefined);
+});
+
+test('a skill file is read only as far as its front matter needs', async t => {
+  const { root, work } = await agentFolder(t);
+  await writeFile(path.join(work, 'skills/research/SKILL.md'), '---\nname: research\ndescription: Short.\n---\n' + 'x'.repeat(6 << 20));
+  const began = performance.now();
+  const profile = checkProfile({ id: 'k', workdir: work, skills: ['skills/research'] }, 'local/k', { home: root });
+  assert.deepEqual(profile.skills.map(s => [s.name, s.description]), [['research', 'Short.']]);
+  assert.ok(performance.now() - began < 5000);
+});

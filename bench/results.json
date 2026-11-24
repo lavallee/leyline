@@ -1,0 +1,240 @@
+{
+ "machine": {
+  "node": "v25.1.0",
+  "cpus": 16,
+  "os": "Linux 7.2.5-3-omarchy",
+  "cpu": "AMD Ryzen 7 5700G with Radeon Graphics",
+  "memoryGb": 31
+ },
+ "runs": 5,
+ "results": [
+  {
+   "name": "store: 1 activity update on a running turn",
+   "value": 3.596,
+   "unit": "ms",
+   "rssMb": 58
+  },
+  {
+   "name": "store: 100 activity updates on a running turn",
+   "value": 5.143,
+   "unit": "ms",
+   "rssMb": 59
+  },
+  {
+   "name": "store: 100 activity updates on a running turn",
+   "value": 19446,
+   "unit": "updates/s",
+   "rssMb": 59
+  },
+  {
+   "name": "store: 1,000 activity updates on a running turn",
+   "value": 10.31,
+   "unit": "ms",
+   "rssMb": 66
+  },
+  {
+   "name": "store: 1,000 activity updates on a running turn",
+   "value": 97029,
+   "unit": "updates/s",
+   "rssMb": 66
+  },
+  {
+   "name": "store: 10,000 activity updates on a running turn",
+   "value": 38.07,
+   "unit": "ms",
+   "rssMb": 72
+  },
+  {
+   "name": "store: 10,000 activity updates on a running turn",
+   "value": 262684,
+   "unit": "updates/s",
+   "rssMb": 72
+  },
+  {
+   "name": "store: open 1,000 conversations (10 turns each, 100 recovered)",
+   "value": 405.9,
+   "unit": "ms",
+   "rssMb": 535
+  },
+  {
+   "name": "store: open 1,000 conversations (10 turns each, 100 recovered)",
+   "value": 0.4059,
+   "unit": "ms/conversation",
+   "rssMb": 535
+  },
+  {
+   "name": "store: open 1,000 conversations at once",
+   "value": 261.3,
+   "unit": "ms",
+   "rssMb": 535
+  },
+  {
+   "name": "store: 200-turn conversation, open",
+   "value": 5.229,
+   "unit": "ms",
+   "rssMb": 86
+  },
+  {
+   "name": "store: 200-turn conversation, one activity update written",
+   "value": 9.416,
+   "unit": "ms/update",
+   "rssMb": 86
+  },
+  {
+   "name": "store: 200-turn conversation, file size",
+   "value": 1697,
+   "unit": "KB",
+   "rssMb": 86
+  },
+  {
+   "name": "store: 150 requests sent at once, all finished and written",
+   "value": 169.8,
+   "unit": "ms",
+   "rssMb": 86
+  },
+  {
+   "name": "rpc: 100,000 notifications through the line reader",
+   "value": 176.2,
+   "unit": "ms",
+   "rssMb": 62
+  },
+  {
+   "name": "rpc: 100,000 notifications through the line reader",
+   "value": 567673,
+   "unit": "lines/s",
+   "rssMb": 62
+  },
+  {
+   "name": "sse: 100,000 events, 16 KB chunks",
+   "value": 92.12,
+   "unit": "ms",
+   "rssMb": 200
+  },
+  {
+   "name": "sse: 100,000 events, 16 KB chunks",
+   "value": 1085577,
+   "unit": "events/s",
+   "rssMb": 200
+  },
+  {
+   "name": "sse: 100,000 events, 64-byte chunks",
+   "value": 275.9,
+   "unit": "ms",
+   "rssMb": 200
+  },
+  {
+   "name": "sse: 100,000 events, 64-byte chunks",
+   "value": 362421,
+   "unit": "events/s",
+   "rssMb": 200
+  },
+  {
+   "name": "sse: one 4 MB event in 1 KB chunks",
+   "value": 7.784,
+   "unit": "ms",
+   "rssMb": 200
+  },
+  {
+   "name": "proposals: make 500 edits on a 1 MB document",
+   "value": 503.9,
+   "unit": "ms",
+   "rssMb": 130
+  },
+  {
+   "name": "proposals: make 500 edits on a 1 MB document",
+   "value": 1.008,
+   "unit": "ms/edit",
+   "rssMb": 130
+  },
+  {
+   "name": "proposals: undo all 500 edits",
+   "value": 550.5,
+   "unit": "ms",
+   "rssMb": 130
+  },
+  {
+   "name": "proposals: refuse a one-letter find that occurs a million times",
+   "value": 0.7035,
+   "unit": "ms",
+   "rssMb": 130
+  },
+  {
+   "name": "proposals: refuse a 2,000-letter find that occurs a million times",
+   "value": 0.3326,
+   "unit": "ms",
+   "rssMb": 130
+  },
+  {
+   "name": "history: save 1,000 versions (all kept)",
+   "value": 2396,
+   "unit": "ms",
+   "rssMb": 101
+  },
+  {
+   "name": "history: save 1,000 versions (all kept)",
+   "value": 2.396,
+   "unit": "ms/save",
+   "rssMb": 101
+  },
+  {
+   "name": "history: list 1,000 versions",
+   "value": 0.3311,
+   "unit": "ms",
+   "rssMb": 101
+  },
+  {
+   "name": "history: read one version of 1,000",
+   "value": 0.1055,
+   "unit": "ms",
+   "rssMb": 101
+  },
+  {
+   "name": "history: restore a version (1,000 in the index)",
+   "value": 4.706,
+   "unit": "ms",
+   "rssMb": 101
+  },
+  {
+   "name": "history: one pruning pass over 1,000 versions",
+   "value": 0.3603,
+   "unit": "ms",
+   "rssMb": 101
+  },
+  {
+   "name": "history: save 1,000 automatic versions (thinned as they age)",
+   "value": 1575,
+   "unit": "ms",
+   "rssMb": 101
+  },
+  {
+   "name": "history: versions left after thinning",
+   "value": 204,
+   "unit": "versions",
+   "rssMb": 101
+  },
+  {
+   "name": "activity: 100,000 events, 10 readers, 100,000 entries kept",
+   "value": 120.2,
+   "unit": "ms",
+   "rssMb": 157
+  },
+  {
+   "name": "activity: 100,000 events, 10 readers, 100,000 entries kept",
+   "value": 831707,
+   "unit": "events/s",
+   "rssMb": 157
+  },
+  {
+   "name": "activity: 100,000 events, 10 readers, default keep (1,000)",
+   "value": 100.1,
+   "unit": "ms",
+   "rssMb": 157
+  },
+  {
+   "name": "activity: 100,000 events, 10 readers, default keep (1,000)",
+   "value": 998982,
+   "unit": "events/s",
+   "rssMb": 157
+  }
+ ]
+}

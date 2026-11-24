@@ -20,7 +20,7 @@
 // Profiles come from sources: local JSON files, or anything with `list()` and `get(id)`.
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { readJson, writeJson } from './files.mjs';
@@ -34,13 +34,25 @@ export class ProfileError extends Error { constructor(message) { super(message);
 /** Doctrine files a profile made from a folder starts with, the first ones found. */
 export const STARTERS = ['AGENTS.md', 'CLAUDE.md', 'CHARTER.md', 'README.md'];
 
-/** A source of profiles kept as `<dir>/<id>.json`. */
+/**
+ * A source of profiles kept as `<dir>/<id>.json`. A file that is not a JSON object is left
+ * out of list() so that one bad file does not hide the rest; problems() names those files.
+ */
 export function fileSource(dir, id = 'local') {
+  const scan = () => {
+    const profiles = [], problems = [];
+    for (const f of existsSync(dir) ? readdirSync(dir).filter(f => f.endsWith('.json')) : []) {
+      try {
+        const raw = JSON.parse(readFileSync(path.join(dir, f), 'utf8'));
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('not a JSON object');
+        profiles.push({ ...raw, id: f.slice(0, -5) });
+      } catch (error) { problems.push({ id: f.slice(0, -5), file: path.join(dir, f), error: String(error.message ?? error).slice(0, 200) }); }
+    }
+    return { profiles, problems };
+  };
   return { id, dir,
-    list() {
-      if (!existsSync(dir)) return [];
-      return readdirSync(dir).filter(f => f.endsWith('.json')).map(f => ({ id: f.slice(0, -5), ...JSON.parse(readFileSync(path.join(dir, f), 'utf8')) }));
-    },
+    list: () => scan().profiles,
+    problems: () => scan().problems,
     get(profileId) {
       const file = path.join(dir, `${profileId}.json`);
       if (!existsSync(file)) throw new ProfileError(`No profile ${id}/${profileId}: put one in ${file}.`);
@@ -107,7 +119,8 @@ export function checkProfile(raw, ref, { home = homedir() } = {}) {
     const file = existsSync(full) && statSync(full).isDirectory() ? path.join(full, 'SKILL.md') : full;
     if (!existsSync(file)) { problems.push(`skill ${given}: no SKILL.md`); continue; }
     // Name and description from the skill's own front matter when the source gave none.
-    const head = readFileSync(file, 'utf8').slice(0, 2000);
+    const fd = openSync(file, 'r'), start = Buffer.alloc(4000);
+    let head; try { head = start.toString('utf8', 0, readSync(fd, start, 0, start.length, 0)).slice(0, 2000); } finally { closeSync(fd); }
     const front = key => head.match(new RegExp(`^${key}:\\s*(.+)$`, 'm'))?.[1]?.trim();
     skills.push({ name: str(s?.name, 80) || front('name') || given, description: str(s?.description, 600) || front('description') || '', path: file });
   }
@@ -173,8 +186,11 @@ export function createProfiles({ dir, sources: extra = [], ttl = 60000, home, no
   async function list() {
     const out = { profiles: [], errors: [] };
     for (const source of sources) {
-      try { for (const p of await source.list()) if (p && ID.test(String(p.id))) out.profiles.push(summary(source, p)); }
-      catch (error) { out.errors.push({ source: source.id, error: String(error.message ?? error) }); }
+      try {
+        for (const p of await source.list()) if (p && ID.test(String(p.id))) out.profiles.push(summary(source, p));
+        // A source that can say which of its entries it had to leave out: each is reported, and the rest still list.
+        for (const problem of typeof source.problems === 'function' ? await source.problems() : []) out.errors.push({ source: source.id, error: `${problem.file ?? problem.id}: ${problem.error}` });
+      } catch (error) { out.errors.push({ source: source.id, error: String(error.message ?? error) }); }
     }
     return out;
   }
@@ -224,10 +240,11 @@ export function createProfiles({ dir, sources: extra = [], ttl = 60000, home, no
  */
 export function createBindings({ file }) {
   if (typeof file !== 'string' || !file) throw new TypeError('Give the bindings a file.');
-  const load = () => readJson(file, {});
+  // A map with no prototype: a document called `constructor` or `__proto__` is a key like any other.
+  const load = () => Object.assign(Object.create(null), readJson(file, {}));
   return {
-    bound: doc => load()[doc] ?? null,
-    all: load,
+    bound: doc => { const all = load(); return Object.hasOwn(all, doc) && typeof all[doc] === 'string' ? all[doc] : null; },
+    all: () => ({ ...load() }),
     bind(doc, ref) {
       if (typeof ref !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}\/[a-z0-9][a-z0-9_-]{0,63}$/i.test(ref)) throw new ProfileError(`A profile is SOURCE/ID, like local/kiefer: ${ref}`);
       const all = load(), was = all[doc] ?? null;

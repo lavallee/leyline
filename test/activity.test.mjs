@@ -71,13 +71,13 @@ test('claims expire, cover a part’s sub-parts, and the host’s own changes ar
 test('touched settles after changes pause, and waits for a run in flight to claim its work', async () => {
   let running = true;
   const docs = { page: { p1: 'a' } };
-  const feed = createActivityFeed({ snapshot: doc => ({ ...docs[doc] }), diff, quietMs: 15, maxWaitMs: 200, claimMs: 300, busy: () => running });
+  const feed = createActivityFeed({ snapshot: doc => ({ ...docs[doc] }), diff, quietMs: 15, maxWaitMs: 200, claimMs: 9000, busy: () => running });   // a run's claim is waited for up to a third of claimMs: long enough that a slow machine cannot use it up
   feed.open('page'); feed.pending('chat', 'page');
   docs.page.p1 = 'b'; feed.touched('page');
   await new Promise(r => setTimeout(r, 50));
   assert.equal(feed.seq, 0, 'a run is in flight: wait for its claim');
   feed.claim('page', scout, ['p1']); running = false;
-  await new Promise(r => setTimeout(r, 60));
+  for (const end = Date.now() + 20000; feed.seq !== 1 && Date.now() < end;) await new Promise(r => setTimeout(r, 5));
   assert.equal(feed.seq, 1);
   assert.equal(feed.pending('chat', 'page').events[0].actor.name, 'Scout');
   docs.page.p1 = 'c'; feed.touched('page'); feed.close('page');
@@ -142,4 +142,32 @@ test('the feed is bounded, notes are events, and readers can be forgotten by pre
   bare.pending('r', 'd'); bare.open('d'); assert.deepEqual(bare.settle('d'), []);
   bare.changed('d', [{ id: 'x', change: 'added' }]);
   assert.equal(bare.pending('r', 'd').events.length, 1);
+});
+
+// ---------------------------------------------------------------- hardening
+
+test('a reader is told exactly what is new, with many events kept and many dropped', () => {
+  for (const keep of [5, 50, 1000]) {
+    const feed = createActivityFeed({ keep });
+    feed.pending('early', 'doc'); feed.pending('late', 'doc');
+    const told = { early: [], late: [] };
+    for (let i = 1; i <= 400; i++) {
+      feed.changed('doc', [{ id: `p${i}`, change: 'updated' }]);
+      if (i % 3 === 0) { const { events, upto } = feed.pending('early', 'doc'); told.early.push(...events.map(e => e.id)); feed.ack('early', upto, events); }
+    }
+    assert.deepEqual(told.early, Array.from({ length: 399 }, (_, i) => `p${i + 1}`), `keep ${keep}: nothing missed or repeated while it keeps up`);
+    const { events } = feed.pending('late', 'doc');
+    assert.deepEqual(events.map(e => e.id), Array.from({ length: Math.min(keep, 400) }, (_, i) => `p${400 - Math.min(keep, 400) + i + 1}`), `keep ${keep}: a slow reader gets the newest that are kept`);
+  }
+});
+
+test('drop() forgets a document and its readers, so a long-lived host does not keep every one it ever opened', () => {
+  const { feed } = setup();
+  feed.open('page'); feed.pending('chat:page', 'page'); feed.pending('other', 'elsewhere');
+  feed.note('page', { text: 'hello' }); feed.selected('page', 'view-1', 'Ada', ['p1']);
+  assert.deepEqual(feed.size(), { docs: 1, readers: 2, events: 2 });
+  feed.drop('page');
+  assert.deepEqual(feed.size(), { docs: 0, readers: 1, events: 0 });
+  assert.deepEqual(feed.selections('page'), []);
+  assert.equal(feed.pending('chat:page', 'page').fresh, true, 'a reader that comes back starts at the present');
 });

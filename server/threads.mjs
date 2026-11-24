@@ -12,7 +12,8 @@
 // By default that is one private JSON file per document in `dir`; a host that keeps
 // comments somewhere of its own (in the source repository, say) passes `storage`.
 import path from 'node:path';
-import { safeName, readJson, writeJson } from './files.mjs';
+import { existsSync, readFileSync } from 'node:fs';
+import { safeName, writeJson, setAside, corruptError } from './files.mjs';
 
 /** Errors fit to show a person. `status` is an HTTP status a host may answer with. */
 export class ThreadError extends Error {
@@ -42,14 +43,33 @@ export function promptFor(thread, { where, label = 'Comment thread' } = {}) {
  * @param {{load: (key: string) => object|null, save: (key: string, data: object) => void}} [options.storage] instead of `dir`
  * @param {(anchor: any) => any} [options.cleanAnchor] checks an anchor and returns it, or throws a ThreadError
  * @param {{text?: number, name?: number, messages?: number}} [options.limits]
+ * @param {boolean} [options.fsync] with `dir`: flush each write to the disk before it replaces the old file; default false
+ * @param {(error: Error) => void} [options.onError] with `dir`: told when a threads file could not be parsed and was
+ *   moved aside (`error.code` is 'corrupt', `error.file` where it went). The document then has no threads.
  * @param {() => number} [options.now]
  */
-export function createThreadStore({ dir, storage, cleanAnchor = anchor => anchor, limits = {}, now = () => Date.now() } = {}) {
+export function createThreadStore({ dir, storage, cleanAnchor = anchor => anchor, limits = {}, fsync = false, onError = () => {}, now = () => Date.now() } = {}) {
   if (!storage && (typeof dir !== 'string' || !dir)) throw new TypeError('Give the thread store a directory or a storage object.');
   const max = { text: 20000, name: 60, messages: 500, ...limits };
   const file = key => path.join(dir, `${safeName(key)}.threads.json`);
-  const store = storage ?? { load: key => readJson(file(key), null), save: (key, data) => writeJson(file(key), data) };
-  const load = key => { const data = store.load(key); return data && Array.isArray(data.threads) ? data : { next: 1, threads: [] }; };
+  // A file that will not parse is kept under another name and reported, so that a damaged
+  // file does not stop people commenting on the document for good.
+  const read = key => {
+    if (!existsSync(file(key))) return null;
+    const text = readFileSync(file(key), 'utf8');
+    try { return JSON.parse(text); }
+    catch { const aside = setAside(file(key)); try { onError(corruptError('A threads file', aside)); } catch { /* a host's handler must not break the store */ } return null; }
+  };
+  const store = storage ?? { load: read, save: (key, data) => writeJson(file(key), data, { fsync }) };
+  // What comes back from storage is data: entries that are not threads are dropped, and a thread always has a list of messages.
+  const load = key => {
+    const data = store.load(key);
+    if (!data || typeof data !== 'object' || !Array.isArray(data.threads)) return { next: 1, threads: [] };
+    data.threads = data.threads.filter(thread => thread && typeof thread === 'object' && !Array.isArray(thread));
+    for (const thread of data.threads) if (!Array.isArray(thread.messages)) thread.messages = [];
+    if (!Number.isInteger(data.next)) data.next = data.threads.reduce((max, thread) => Math.max(max, Number(thread.id) || 0), 0) + 1;
+    return data;
+  };
   const stamp = () => new Date(now()).toISOString();
 
   const author = who => ({ kind: who?.kind === 'agent' ? 'agent' : 'person', name: String(who?.name || (who?.kind === 'agent' ? 'Agent' : 'Someone')).slice(0, max.name) });

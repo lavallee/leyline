@@ -84,6 +84,8 @@ export function createOtlpReporter({ url, tokenEnv, headers = {}, serviceName, a
       const response = await fetcher(target, { method: 'POST', signal: AbortSignal.timeout(timeout),
         headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}), ...headers },
         body: JSON.stringify(otlpPayload(record, { serviceName, attributes })) });
+      // The answer's body is of no interest, and left unread it would hold its connection.
+      await response.body?.cancel?.().catch(() => {});
       if (!response.ok) throw new Error(`The telemetry endpoint answered ${response.status}.`);
       return true;
     } catch (error) { try { onError(error); } catch { /* nothing more to do */ } return false; }

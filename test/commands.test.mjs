@@ -139,3 +139,63 @@ test('readStdin collects a stream', async () => {
   async function* chunks() { yield '{"edits":'; yield '[]}'; }
   assert.equal(await readStdin(chunks()), '{"edits":[]}');
 });
+
+// ---------------------------------------------------------------- hardening
+
+test('a request line the URL parser rejects is answered, not thrown at the host', async () => {
+  const endpoint = createCommandEndpoint({ port: 4173, operations: { show: () => ({}) } });
+  const sent = [];
+  const res = { headersSent: false, writeHead(status) { sent.push(status); this.headersSent = true; }, end() {} };
+  for (const url of ['//[', 'http://[/agent/show', '/agent/%']) {
+    const handled = await endpoint.handle({ ...request({}, endpoint.key), url, method: 'POST', on() {} }, res);
+    assert.equal(typeof handled, 'boolean', url);
+  }
+  assert.ok(sent.every(status => status === 404), `${sent}`);
+});
+
+test('a body over the limit is answered with 413, whether or not its length was declared', async t => {
+  const endpoint = createCommandEndpoint({ port: () => port, operations: { echo: data => data }, maxBody: 1000 });
+  const server = http.createServer((req, res) => endpoint.handle(req, res));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const port = server.address().port;
+  const head = ['POST /agent/echo HTTP/1.1', `Host: 127.0.0.1:${port}`, 'Content-Type: application/json', `Authorization: Bearer ${endpoint.key}`];
+  const declared = await raw(port, head, JSON.stringify({ a: 'x'.repeat(5000) }));
+  assert.equal(declared.status, 413);
+  assert.match(declared.text, /too large/);
+  // Chunked, so no length is known in advance.
+  const chunked = await new Promise((resolve, reject) => {
+    const socket = net.connect(port, '127.0.0.1', () => {
+      socket.write([...head, 'Transfer-Encoding: chunked', 'Connection: close', '', ''].join('\r\n'));
+      const chunk = 'y'.repeat(400), timer = setInterval(() => socket.write(`${chunk.length.toString(16)}\r\n${chunk}\r\n`, () => {}), 2);
+      socket.on('close', () => clearInterval(timer));
+    });
+    let text = ''; socket.on('data', d => { text += d; }); socket.on('close', () => resolve({ status: Number(text.split(' ')[1]) })); socket.on('error', () => {});
+  });
+  assert.equal(chunked.status, 413);
+});
+
+test('a body that stops arriving is given up on after bodyTimeout', async t => {
+  const endpoint = createCommandEndpoint({ port: () => port, operations: { echo: data => data }, bodyTimeout: 150 });
+  const server = http.createServer((req, res) => endpoint.handle(req, res));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const port = server.address().port, began = Date.now();
+  const status = await new Promise(resolve => {
+    const socket = net.connect(port, '127.0.0.1', () => socket.write(['POST /agent/echo HTTP/1.1', `Host: 127.0.0.1:${port}`, 'Content-Type: application/json', `Authorization: Bearer ${endpoint.key}`, 'Content-Length: 500', '', '{"a":'].join('\r\n')));
+    let text = ''; socket.on('data', d => { text += d; }); socket.on('close', () => resolve(Number(text.split(' ')[1]))); socket.on('error', () => {});
+  });
+  assert.equal(status, 408);
+  assert.ok(Date.now() - began < 20000);
+});
+
+test('rotate() replaces the key: the old one stops working at once', async t => {
+  const { port, key } = await host(t, { show: () => ({ ok: true }) });
+  assert.ok(key);
+  const endpoint = createCommandEndpoint({ port, operations: {} });
+  const first = endpoint.key, second = endpoint.rotate();
+  assert.match(second, /^[0-9a-f]{48}$/); assert.notEqual(first, second);
+  assert.equal(endpoint.key, second);
+  assert.equal(verifyRequest(request({}, first, port), { key: endpoint.key, port }), false);
+  assert.equal(verifyRequest(request({}, second, port), { key: endpoint.key, port }), true);
+});

@@ -159,7 +159,10 @@ test('abort, cancel and timeout stop a request that is waiting on the model', as
   assert.equal(provider.cancel('k'), false);
   await assert.rejects(provider.run({ input: 'x', timeout: 80 }), { code: 'timeout' });
   await assert.rejects(provider.run({ input: 'x', signal: AbortSignal.abort() }), { code: 'stopped' });
-  await provider.run({ key: 'k', input: 'again', timeout: 80 }).catch(() => {});
+  // Stopped only once the endpoint has the request, so the check below reads this request however slow the machine is.
+  const before = seen.length, again = provider.run({ key: 'k', input: 'again', onText: () => provider.cancel('k') });
+  await assert.rejects(again, { code: 'stopped' });
+  assert.equal(seen.length, before + 1);
   assert.deepEqual(seen.at(-1).body.messages, [{ role: 'user', content: 'again' }], 'a stopped exchange is not remembered');
 });
 
@@ -168,4 +171,130 @@ test('sseEvents handles split chunks, CRLF and multi-line data', async () => {
   async function* chunks() { for (const part of ['event: a\r\nda', 'ta: one\r\n\r\ndata: two\ndata: three\n', '\ndata: last']) yield encoder.encode(part); }
   const out = []; for await (const e of sseEvents(chunks())) out.push(e);
   assert.deepEqual(out, [{ event: 'a', data: 'one' }, { event: 'message', data: 'two\nthree' }, { event: 'message', data: 'last' }]);
+});
+
+// ---------------------------------------------------------------- hardening
+
+const random = seed => () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 2 ** 32; };
+const collect = async (iterable, options) => { const out = []; for await (const e of sseEvents(iterable, options)) out.push(e); return out; };
+async function* pieces(bytes, cuts) { let from = 0; for (const cut of [...cuts, bytes.length]) { if (cut > from) yield bytes.subarray(from, cut); from = Math.max(from, cut); } }
+
+test('sseEvents: a CR and its LF in different chunks are one line ending', async () => {
+  const encoder = new TextEncoder();
+  async function* chunks() { for (const part of ['event: a\r', '\ndata: one\r', '\ndata: two\r\n\r', '\nevent: b\r\ndata: three\r\n\r\n']) yield encoder.encode(part); }
+  assert.deepEqual(await collect(chunks()), [{ event: 'a', data: 'one\ntwo' }, { event: 'b', data: 'three' }]);
+});
+
+test('sseEvents: the events are the same however the bytes are split', async () => {
+  for (const seed of [11, 12, 13, 14, 15, 16, 17, 18]) {
+    const next = random(seed), pick = list => list[Math.floor(next() * list.length)], expected = [];
+    let text = '';
+    for (let i = 0; i < 120; i++) {
+      const eol = pick(['\n', '\n', '\r\n', '\r']);
+      if (next() < 0.15) { text += `: comment ${i}${eol}${eol}`; continue; }
+      const name = next() < 0.4 ? pick(['delta', 'ping', 'error']) : null;
+      const lines = Array.from({ length: 1 + Math.floor(next() * 3) }, () => pick(['plain', '{"text":"naïve café"}', '日本語 🙂', '', ' leading space', 'x'.repeat(Math.floor(next() * 400))]));
+      if (name) text += `event: ${name}${eol}`;
+      for (const line of lines) text += `data:${next() < 0.8 ? ' ' : line.startsWith(' ') ? ' ' : ''}${line}${eol}`;
+      if (next() < 0.2) text += `id: ${i}${eol}retry: 100${eol}`;
+      text += eol;
+      expected.push({ event: name || 'message', data: lines.join('\n') });
+    }
+    const bytes = new TextEncoder().encode(text);
+    for (let round = 0; round < 12; round++) {
+      const cuts = Array.from({ length: Math.floor(next() * (round < 2 ? 2000 : 40)) }, () => Math.floor(next() * bytes.length)).sort((a, b) => a - b);
+      assert.deepEqual(await collect(pieces(bytes, cuts)), expected, `seed ${seed}, round ${round}`);
+    }
+  }
+});
+
+test('sseEvents: an event larger than the cap is refused, not held in memory', async () => {
+  const encoder = new TextEncoder();
+  async function* endless() { yield encoder.encode('data: '); for (let i = 0; i < 1000; i++) yield encoder.encode('x'.repeat(1000)); }
+  await assert.rejects(collect(endless(), { maxEvent: 50000 }), { code: 'failed' });
+});
+
+test('a stream that ends before the model finished is an error, not a short answer', async t => {
+  const { base } = await endpoint(t, (req, body, res) => body.max_tokens
+    ? sse(res, [event('message_start', { type: 'message_start', message: { model: 'm' } }), event('content_block_delta', { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Half an ans' } })])
+    : sse(res, [data({ choices: [{ delta: { content: 'Half an ans' } }] })]));
+  for (const wire of ['openai', 'anthropic']) {
+    const provider = new HttpChatProvider({ baseUrl: base, wire, model: 'm' });
+    await assert.rejects(provider.run({ key: 'k', input: 'x' }), error => error.code === 'unavailable' && /cut off/.test(error.message), wire);
+    assert.equal(provider.histories.has('k'), false, 'half an answer is not remembered');
+  }
+});
+
+test('answers that are not what the wire promises are failures with a code, never a crash', async t => {
+  const { base } = await endpoint(t, (req, body, res) => {
+    const ask = body.messages.at(-1).content;
+    if (ask === 'html') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end('<html>gateway says hello</html>'); }
+    if (ask === 'null') return json(res, null);
+    if (ask === 'list') return json(res, [1, 2]);
+    if (ask === 'odd-stream') return sse(res, ['data: null\n\n', 'data: 7\n\n', 'data: "text"\n\n', data({ choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] }), 'data: [DONE]\n\n']);
+    json(res, {});
+  });
+  const whole = new HttpChatProvider({ baseUrl: base, model: 'm', stream: false });
+  for (const ask of ['html', 'null', 'list']) await assert.rejects(whole.run({ input: ask }), error => error.code === 'failed' && /expected form/.test(error.message), ask);
+  assert.equal((await new HttpChatProvider({ baseUrl: base, model: 'm' }).run({ input: 'odd-stream' })).message, 'ok');
+});
+
+test('the key never appears in an error, even when the endpoint echoes it', async t => {
+  const key = 'sk-live-0123456789abcdef', token = 'proxy-token-abcdef123456';
+  const { base } = await endpoint(t, (req, body, res) => {
+    const ask = body.messages.at(-1).content;
+    if (ask === 'status') return json(res, { error: { message: `Incorrect API key provided: ${req.headers.authorization}; also ${req.headers['x-proxy']}` } }, 401);
+    sse(res, [data({ error: { message: `upstream rejected ${key}` } })]);
+  });
+  const provider = new HttpChatProvider({ baseUrl: base, model: 'm', apiKeyEnv: 'K', env: { K: key }, headers: { 'x-proxy': token } });
+  for (const ask of ['status', 'stream']) await assert.rejects(provider.run({ input: ask }), error => {
+    assert.ok(!error.message.includes(key) && !error.message.includes(token), `${ask}: ${error.message}`);
+    return error.name === 'ProviderError';
+  });
+});
+
+test('an answer larger than the provider accepts is refused while it arrives', async t => {
+  const { base } = await endpoint(t, (req, body, res) => {
+    if (body.stream) {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const timer = setInterval(() => res.write(data({ choices: [{ delta: { content: 'x'.repeat(5000) } }] })), 1);
+      res.on('close', () => clearInterval(timer));
+    } else json(res, { choices: [{ message: { content: 'y'.repeat(500000) }, finish_reason: 'stop' }] });
+  });
+  const began = Date.now();
+  await assert.rejects(new HttpChatProvider({ baseUrl: base, model: 'm', maxResponse: 40000 }).run({ input: 'x', timeout: 120000 }), { code: 'failed', message: /more than/ });
+  await assert.rejects(new HttpChatProvider({ baseUrl: base, model: 'm', maxResponse: 40000, stream: false }).run({ input: 'x', timeout: 120000 }), { code: 'failed', message: /more than/ });
+  assert.ok(Date.now() - began < 30000);
+});
+
+test('idleTimeout: a stream that goes quiet is stopped long before the overall timeout', async t => {
+  const { base } = await endpoint(t, (req, body, res) => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write(data({ choices: [{ delta: { content: 'begun' } }] })); });
+  const began = Date.now();
+  await assert.rejects(new HttpChatProvider({ baseUrl: base, model: 'm', idleTimeout: 120 }).run({ input: 'x', timeout: 120000 }), { code: 'timeout' });
+  assert.ok(Date.now() - began < 30000);
+});
+
+test('retries: off by default; when asked, only before any answer has arrived, and a stop ends the wait', async t => {
+  let calls = 0, plan = [];
+  const { base } = await endpoint(t, (req, body, res) => {
+    const step = plan[calls++] ?? 'ok';
+    if (step === 'ok') return json(res, { choices: [{ message: { content: `answer after ${calls} calls` }, finish_reason: 'stop' }] });
+    if (step === 'midstream') return sse(res, [data({ choices: [{ delta: { content: 'par' } }] }), data({ error: { message: 'overloaded' } })]);
+    if (step === 'drop') return req.socket.destroy();
+    res.writeHead(step, { 'content-type': 'application/json', ...(step === 429 ? { 'retry-after': '0' } : {}) }); res.end(JSON.stringify({ error: { message: `status ${step}` } }));
+  });
+  const make = options => new HttpChatProvider({ baseUrl: base, model: 'm', stream: false, retryDelay: 5, ...options });
+  const reset = steps => { calls = 0; plan = steps; };
+  reset([503]); await assert.rejects(make().run({ input: 'x' }), { code: 'unavailable' }); assert.equal(calls, 1, 'no retry unless asked');
+  reset([503, 429, 'drop']); assert.equal((await make({ retries: 3 }).run({ input: 'x' })).message, 'answer after 4 calls');
+  reset([503, 503, 503]); await assert.rejects(make({ retries: 2 }).run({ input: 'x' }), { code: 'unavailable' }); assert.equal(calls, 3, 'gives up after the retries');
+  reset([400]); await assert.rejects(make({ retries: 3 }).run({ input: 'x' }), { code: 'failed' }); assert.equal(calls, 1, 'a refusal of the request itself is not retried');
+  reset([401]); await assert.rejects(make({ retries: 3 }).run({ input: 'x' }), { code: 'auth' }); assert.equal(calls, 1);
+  reset(['midstream']); await assert.rejects(make({ retries: 3, stream: true }).run({ input: 'x' }), { code: 'failed' }); assert.equal(calls, 1, 'never once part of an answer has arrived');
+  reset([503, 503, 503, 503]);
+  const controller = new AbortController(), began = Date.now();
+  const waiting = make({ retries: 3, retryDelay: 120000 }).run({ input: 'x', signal: controller.signal });
+  setTimeout(() => controller.abort(), 100);
+  await assert.rejects(waiting, { code: 'stopped' });
+  assert.ok(Date.now() - began < 25000 && calls === 1);
 });

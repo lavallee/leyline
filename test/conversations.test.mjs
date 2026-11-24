@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, readdir, stat, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, readdir, stat, writeFile, mkdir, chmod } from 'node:fs/promises';
 import path from 'node:path';
 import { createConversationStore as create, ConversationError, fileNameFor, TURN_STATUSES } from '../server/conversations.mjs';
 import { tempDir, until, deferred, beforeCleanup } from './helpers.mjs';
@@ -290,4 +290,234 @@ test('save() lets a host write its own changes; close() stops everything and flu
   assert.equal(await store.turn('k', running.id), running);
   assert.equal(store.get('k'), conversation);
   assert.equal(store.get('unopened'), undefined);
+  await assert.rejects(store.send('k', { user: 'late' }), { code: 'closed', status: 503 });
+});
+
+// ---------------------------------------------------------------- hardening
+
+const ticks = async (n = 5) => { for (let i = 0; i < n; i++) await Promise.resolve(); };
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+test('a file that cannot be parsed is moved aside and reported, never overwritten', async t => {
+  const dir = await tempDir(t), errors = [];
+  const half = '{ "key": "page", "turns": [ { "id": "a", "user": "precious", "status": "succ';
+  await writeFile(path.join(dir, 'page.json'), half);
+  await writeFile(path.join(dir, 'empty.json'), '');
+  await writeFile(path.join(dir, 'shape.json'), JSON.stringify({ key: 'shape', turns: 'not a list', precious: true }));
+  const store = createConversationStore({ dir, run: async () => ({ message: 'ok' }), onError: e => errors.push(e) });
+  for (const key of ['page', 'empty', 'shape']) {
+    assert.deepEqual((await store.open(key)).turns, [], key);
+    await settled(await store.send(key, { user: 'new' }));
+  }
+  await store.flush();
+  const names = await readdir(dir);
+  const aside = names.find(name => name.startsWith('page.json.corrupt-'));
+  assert.ok(aside, `the unreadable file is kept under another name: ${names}`);
+  assert.equal(await readFile(path.join(dir, aside), 'utf8'), half, 'byte for byte');
+  assert.ok(names.some(name => name.startsWith('empty.json.corrupt-')) && names.some(name => name.startsWith('shape.json.corrupt-')));
+  assert.equal((await onDisk(dir, 'page')).turns[0].user, 'new');
+  assert.equal(errors.length, 3);
+  assert.ok(errors.every(e => e.code === 'corrupt' && typeof e.file === 'string'), 'reported with a code and where the file went');
+});
+
+test('a file that belongs to another key is moved aside too, not written over', async t => {
+  const dir = await tempDir(t), errors = [];
+  await writeFile(path.join(dir, 'other.json'), JSON.stringify({ key: 'someone-else', turns: [{ id: 'z', user: 'theirs', status: 'succeeded' }] }));
+  const store = createConversationStore({ dir, run: async () => ({ message: 'ok' }), onError: e => errors.push(e) });
+  await settled(await store.send('other', { user: 'mine' }));
+  await store.flush();
+  const aside = (await readdir(dir)).find(name => name.startsWith('other.json.foreign-'));
+  assert.equal(JSON.parse(await readFile(path.join(dir, aside), 'utf8')).turns[0].user, 'theirs');
+  assert.equal(errors[0].code, 'corrupt');
+});
+
+test('a file that cannot be read at all fails the open, changes nothing, and is tried again next time', async t => {
+  const dir = await tempDir(t);
+  await mkdir(path.join(dir, 'page.json'));                 // reading it fails with EISDIR, as a permission or I/O error would
+  const store = createConversationStore({ dir, run: async () => ({ message: 'ok' }) });
+  await assert.rejects(store.open('page'), error => error instanceof ConversationError && error.code === 'unreadable' && error.status === 500);
+  await assert.rejects(store.send('page', { user: 'x' }), { code: 'unreadable' });
+  assert.equal(store.get('page'), undefined);
+  assert.ok((await stat(path.join(dir, 'page.json'))).isDirectory(), 'left exactly as it was');
+  const { rmdir } = await import('node:fs/promises');
+  await rmdir(path.join(dir, 'page.json'));
+  await writeFile(path.join(dir, 'page.json'), JSON.stringify({ key: 'page', turns: [{ id: 'a', user: 'kept', status: 'succeeded', message: '' }] }));
+  assert.equal((await store.open('page')).turns[0].user, 'kept', 'the failure was not remembered');
+});
+
+test('entries in turns that are not turns do not break the conversation', async t => {
+  const dir = await tempDir(t);
+  await writeFile(path.join(dir, 'page.json'), JSON.stringify({ key: 'page', turns: [null, 7, 'text', [], { id: 'a', user: 'real', status: 'running' }] }));
+  const store = createConversationStore({ dir, run: async () => ({ message: 'ok' }) });
+  const conversation = await store.open('page');
+  assert.deepEqual(conversation.turns.map(turn => [turn.id, turn.status]), [['a', 'failed']]);
+  assert.equal(await store.open('page'), conversation);
+  await settled(await store.send('page', { user: 'next' }));
+});
+
+test('a leftover temporary file with loose permissions does not loosen the conversation file', async t => {
+  const dir = await tempDir(t);
+  await writeFile(path.join(dir, 'k.json.tmp'), 'left by a crash');
+  await chmod(path.join(dir, 'k.json.tmp'), 0o644);
+  const store = createConversationStore({ dir, run: async () => ({ message: 'ok' }) });
+  await store.save('k');                                   // one write, so the file is whatever that write made it
+  assert.equal((await stat(path.join(dir, 'k.json'))).mode & 0o777, 0o600);
+});
+
+test('stopAll, stop and close while a send is still being written: the request does not run', async t => {
+  const dir = await tempDir(t), ran = [];
+  const make = () => createConversationStore({ dir, run: async turn => { ran.push(turn.user); return { message: 'ran' }; } });
+  let store = make();
+  await store.open('k');
+  let sending = store.send('k', { user: 'stop-all' });
+  await ticks();
+  await store.stopAll('k');
+  let turn = await sending;
+  await sleep(30);
+  assert.equal(turn.status, 'stopped');
+  sending = store.send('k', { user: 'stop-one' });
+  await ticks();
+  await store.stop('k', store.get('k').turns.at(-1).id);
+  turn = await sending; await sleep(30);
+  assert.equal(turn.status, 'stopped');
+  sending = store.send('k', { user: 'closing' });
+  await ticks();
+  await store.close();
+  turn = await sending; await sleep(30);
+  assert.equal(turn.status, 'stopped');
+  assert.deepEqual(ran, []);
+  assert.deepEqual((await onDisk(dir, 'k')).turns.map(t => t.status), ['stopped', 'stopped', 'stopped']);
+  assert.equal(store.busy('k'), false);
+});
+
+test('reset while a send is still being written is refused, so no request runs outside its conversation', async t => {
+  const dir = await tempDir(t);
+  const store = createConversationStore({ dir, run: async () => ({ message: 'ran' }) });
+  await settled(await store.send('k', { user: 'old' }));
+  const sending = store.send('k', { user: 'new' });
+  await ticks();
+  assert.equal(store.busy('k'), true, 'a request on its way in counts');
+  await assert.rejects(store.reset('k'), { code: 'busy' });
+  const turn = await sending; await settled(turn);
+  assert.ok(store.get('k').turns.includes(turn));
+  // And the other order: a send that arrives while a reset is archiving lands in the new conversation.
+  await store.flush();
+  const resetting = store.reset('k'), late = store.send('k', { user: 'after reset' });
+  await resetting; await settled(await late); await store.flush();
+  assert.deepEqual((await onDisk(dir, 'k')).turns.map(t => t.user), ['after reset']);
+  const [archived] = await readdir(path.join(dir, 'archive'));
+  assert.deepEqual(JSON.parse(await readFile(path.join(dir, 'archive', archived), 'utf8')).turns.map(t => t.user), ['old', 'new']);
+});
+
+test('requestId: the same request sent twice is one turn, in this process and after a restart', async t => {
+  const dir = await tempDir(t), ran = [];
+  const make = () => createConversationStore({ dir, run: async turn => { ran.push(turn.user); return { message: 'ok' }; } });
+  const store = make();
+  const [a, b] = await Promise.all([store.send('k', { user: 'once', requestId: 'r-1' }), store.send('k', { user: 'once', requestId: 'r-1' })]);
+  assert.equal(a, b);
+  await settled(a);
+  assert.equal(await store.send('k', { user: 'once', requestId: 'r-1' }), a);
+  const other = await store.send('k', { user: 'another', requestId: 'r-2' }); await settled(other);
+  await store.close();
+  const again = make();
+  assert.equal((await again.send('k', { user: 'once', requestId: 'r-1' })).id, a.id);
+  await again.flush();
+  assert.deepEqual(ran, ['once', 'another']);
+  assert.equal((await onDisk(dir, 'k')).turns.length, 2);
+  await assert.rejects(again.send('k', { user: 'x', requestId: 7 }), { code: 'invalid' });
+});
+
+test('a run result cannot change what a turn is: reserved fields and __proto__ are ignored', async t => {
+  const store = createConversationStore({ dir: await tempDir(t), run: async () => JSON.parse('{"message":"ok","__proto__":{"polluted":true},"id":"x","status":"y","activities":"z"}') });
+  const turn = await store.send('k', { user: 'x' }); await settled(turn);
+  assert.equal(turn.polluted, undefined);
+  assert.equal(Object.getPrototypeOf(turn), Object.prototype);
+  assert.equal(turn.status, 'succeeded');
+  assert.ok(Array.isArray(turn.activities));
+});
+
+test('stopGrace: a run that never settles is recorded as stopped and its lane freed', async t => {
+  const late = [];
+  const store = createConversationStore({ dir: await tempDir(t), maxLanes: 1, stopGrace: 60, run: (turn, lane, signal, tools) => turn.user === 'stuck'
+    ? new Promise(() => { setTimeout(() => late.push(tools.activity({ id: 'late', status: 'running' })), 200); }) : Promise.resolve({ message: 'ok' }) });
+  const stuck = await store.send('k', { user: 'stuck' }), next = await store.send('k', { user: 'next' });
+  await until(() => stuck.status === 'running');
+  await store.stop('k', stuck.id);
+  await settled(stuck); await settled(next);
+  assert.deepEqual([stuck.status, next.status, next.lane], ['stopped', 'succeeded', 'main']);
+  await until(() => late.length === 1);
+  assert.deepEqual(late, [null], 'activity from an abandoned run is not recorded');
+  assert.deepEqual(stuck.activities, []);
+});
+
+test('unload and evictAfter give memory back for idle conversations, and never for busy ones', async t => {
+  const dir = await tempDir(t), gate = deferred();
+  const store = createConversationStore({ dir, evictAfter: 40, run: async turn => { if (turn.user === 'wait') await gate.promise; return { message: 'ok' }; } });
+  await settled(await store.send('idle', { user: 'x' }));
+  const waiting = await store.send('busy', { user: 'wait' });
+  assert.equal(store.unload('busy'), false);
+  await until(() => store.get('idle') === undefined);
+  assert.ok(store.get('busy'), 'a conversation with work in it stays');
+  assert.equal((await store.open('idle')).turns[0].status, 'succeeded', 'and comes back from disk as it was');
+  gate.resolve(); await settled(waiting); await store.flush();
+  assert.equal(store.unload('busy'), true);
+  assert.equal(store.get('busy'), undefined);
+  assert.deepEqual(store.loaded().sort(), ['idle']);
+});
+
+test('fsync: true writes the same files', async t => {
+  const dir = await tempDir(t);
+  const store = createConversationStore({ dir, fsync: true, run: async () => ({ message: 'ok' }) });
+  await settled(await store.send('k', { user: 'x' })); await store.flush();
+  assert.equal((await onDisk(dir, 'k')).turns[0].status, 'succeeded');
+  assert.deepEqual((await readdir(dir)).filter(name => name.endsWith('.tmp')), []);
+});
+
+test('random interleavings of send, stop, reset, save and restart keep the store consistent', async t => {
+  for (const seed of [1, 2, 3, 4, 5, 6]) {
+    let state = seed; const next = () => { state = (state * 1664525 + 1013904223) >>> 0; return state / 2 ** 32; };
+    const dir = await tempDir(t), inLane = new Map(), problems = [], gates = new Set(), acknowledged = new Map();
+    const open = () => create({ dir, maxLanes: 3, saveDelay: 1, onError: e => problems.push(`onError: ${e.message}`), run: async (turn, lane, signal, tools) => {
+      if (inLane.has(lane.id)) problems.push(`lane ${lane.id} double-booked`);
+      inLane.set(lane.id, turn.id);
+      try {
+        tools.activity({ id: 'a', kind: 'activity', title: 'Working', status: 'running' });
+        await new Promise((resolve, reject) => { const gate = { resolve, reject }; gates.add(gate); signal.addEventListener('abort', () => { gates.delete(gate); reject(new Error('aborted')); }); });
+        if (next() < 0.2) throw new Error('run failed');
+        return { message: 'done' };
+      } finally { inLane.delete(lane.id); }
+    } });
+    let store = open();
+    const keys = ['a', 'b', 'weird/key?'], outstanding = [];
+    for (let step = 0; step < 160; step++) {
+      const key = keys[Math.floor(next() * keys.length)], roll = next(), turns = store.get(key)?.turns ?? [];
+      if (roll < 0.4) outstanding.push(store.send(key, { user: `s${step}` }).then(turn => acknowledged.set(turn.id, key), error => { if (!['full', 'busy', 'closed'].includes(error.code)) problems.push(`send: ${error.message}`); }));
+      else if (roll < 0.6) { const gate = [...gates][Math.floor(next() * gates.size)]; if (gate) { gates.delete(gate); gate.resolve(); } }
+      else if (roll < 0.7 && turns.length) store.stop(key, turns[Math.floor(next() * turns.length)].id).catch(e => { if (e.code !== 'closed') problems.push(`stop: ${e.message}`); });
+      else if (roll < 0.75) store.stopAll(key).catch(e => { if (e.code !== 'closed') problems.push(`stopAll: ${e.message}`); });
+      else if (roll < 0.82) store.reset(key).catch(error => { if (!['busy', 'closed'].includes(error.code)) problems.push(`reset: ${error.message}`); });
+      else if (roll < 0.88) store.save(key).catch(e => { if (e.code !== 'closed') problems.push(`save: ${e.message}`); });
+      else if (roll < 0.91) { await store.close(); for (const gate of gates) gate.resolve(); gates.clear(); store = open(); }
+      if (next() < 0.5) await sleep(Math.floor(next() * 3)); else await ticks(Math.floor(next() * 6));
+      for (const k of keys) if (store.lanes(k).length > 3) problems.push('more lanes than the cap');
+    }
+    // Every send has been answered (one still loading its conversation is not yet work the store can see), then every turn has finished.
+    await Promise.all(outstanding);
+    await until(() => { for (const gate of gates) gate.resolve(); gates.clear(); return keys.every(key => !store.busy(key)); }, 60000);
+    await store.flush(); await sleep(10); await store.flush();
+    // Memory and disk agree, nothing is left unfinished, and every request the store accepted is in its conversation or an archive.
+    const kept = new Set();
+    for (const key of keys) {
+      const memory = store.get(key), disk = await onDisk(dir, key).catch(() => null);
+      if (!disk) { assert.equal(memory, undefined, `seed ${seed}: ${key} is in memory but not on disk`); continue; }
+      if (memory) assert.deepEqual(disk, JSON.parse(JSON.stringify(memory)), `seed ${seed}: ${key} on disk is what is in memory`);
+      else await store.open(key);                           // not opened since the last restart: recover what that left
+      for (const turn of (await store.open(key)).turns) { kept.add(turn.id); assert.ok(['succeeded', 'failed', 'stopped'].includes(turn.status), `seed ${seed}: ${turn.status}`); assert.ok(turn.activities.every(a => a.status !== 'running')); }
+    }
+    for (const name of await readdir(path.join(dir, 'archive')).catch(() => [])) for (const turn of JSON.parse(await readFile(path.join(dir, 'archive', name), 'utf8')).turns) kept.add(turn.id);
+    for (const [id, key] of acknowledged) assert.ok(kept.has(id), `seed ${seed}: a request accepted for ${key} was lost`);
+    assert.deepEqual((await readdir(dir)).filter(name => name.endsWith('.tmp')), [], 'no temporary files left');
+    assert.deepEqual(problems, [], `seed ${seed}`);
+    await store.close();
+  }
 });

@@ -113,3 +113,49 @@ test('diffParts names what was added, updated and removed', () => {
   assert.deepEqual(diffParts({ a: '1', b: '2', '~x': '1' }, { a: '1', b: '3', c: '4', '~x': '2' }), { added: ['c'], updated: ['b'], removed: [] });
   assert.deepEqual(diffParts({ a: '1' }, {}), { added: [], updated: [], removed: ['a'] });
 });
+
+// ---------------------------------------------------------------- hardening
+
+test('an index that cannot be parsed is moved aside and rebuilt from the version files', async t => {
+  const dir = await tempDir(t), errors = [];
+  const { writeFile, readFile } = await import('node:fs/promises');
+  let clock = Date.parse('2026-11-23T10:00:00Z');
+  const history = createHistory({ dir, now: () => (clock += 1000), onError: e => errors.push(e) });
+  for (const text of ['one', 'two', 'three']) history.save('doc', { data: text });
+  await writeFile(path.join(dir, 'doc', 'index.json'), '{ "next": 4, "versions": [ { "n": 1, "t": "2026');
+  assert.deepEqual(history.list('doc').map(v => v.n), [3, 2, 1], 'the versions are still there');
+  assert.equal(history.read('doc', 2).data, 'two');
+  const saved = history.save('doc', { data: 'four' });
+  assert.equal(saved.n, 4, 'numbering carries on after the highest file');
+  assert.equal(history.restore('doc', 1, { current: { data: 'four' } }).data, 'one');
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].code, 'corrupt');
+  assert.match(await readFile(errors[0].file, 'utf8'), /"next": 4/, 'the broken index is kept for a person to look at');
+});
+
+test('a version file that cannot be read is treated as missing, not thrown from read()', async t => {
+  const dir = await tempDir(t);
+  const { writeFile } = await import('node:fs/promises');
+  const history = createHistory({ dir });
+  history.save('doc', { data: 'one' }); history.save('doc', { data: 'two' });
+  await writeFile(path.join(dir, 'doc', '1.json.gz'), 'not gzip at all');
+  assert.equal(history.read('doc', 1), null);
+  assert.throws(() => history.restore('doc', 1), RangeError);
+  assert.equal(history.read('doc', 2).data, 'two');
+});
+
+test('part names that are also Object properties are reported like any other', () => {
+  assert.deepEqual(diffParts({}, { constructor: 'a', toString: 'b', plain: 'c' }), { added: ['constructor', 'toString', 'plain'], updated: [], removed: [] });
+  assert.deepEqual(diffParts({ constructor: 'a' }, {}), { added: [], updated: [], removed: ['constructor'] });
+});
+
+test('what another process wrote is seen: the index is not trusted beyond the file on disk', async t => {
+  const dir = await tempDir(t);
+  const a = createHistory({ dir }), b = createHistory({ dir });
+  a.save('doc', { data: 'from a' });
+  assert.equal(b.list('doc').length, 1);
+  b.save('doc', { data: 'from b' });
+  assert.deepEqual(a.list('doc').map(v => v.n), [2, 1]);
+  assert.equal(a.save('doc', { data: 'again from a' }).n, 3);
+  assert.equal(b.read('doc', 3).data, 'again from a');
+});

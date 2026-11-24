@@ -47,8 +47,8 @@ export async function writeSession({ app, name, url, key, stateDir }) {
   // Written beside the real file and renamed, so the mode is right even when an older
   // file with a looser one is being replaced, and a reader never sees half a file.
   const temporary = `${file}.${randomBytes(4).toString('hex')}.tmp`;
-  await writeFile(temporary, JSON.stringify({ url, key }), { mode: 0o600, flag: 'wx' });
-  await rename(temporary, file);
+  try { await writeFile(temporary, JSON.stringify({ url, key }), { mode: 0o600, flag: 'wx' }); await rename(temporary, file); }
+  catch (error) { await rm(temporary, { force: true }).catch(() => {}); throw error; }
   return file;
 }
 
@@ -80,12 +80,25 @@ export function verifyRequest(req, { key, port }) {
   return typeof header === 'string' && header.startsWith('Bearer ') && sameSecret(header.slice(7), key);
 }
 
-function readBody(req, limit) {
+const refusal = (message, status) => Object.assign(new Error(message), { status });
+
+// The request body as JSON. Refused when it is declared or turns out larger than `limit`,
+// and when it stops arriving for `timeout` milliseconds.
+function readBody(req, limit, timeout) {
   return new Promise((resolve, reject) => {
-    let size = 0; const chunks = [];
-    req.on('data', chunk => { size += chunk.length; if (size > limit) { reject(Object.assign(new Error('The request is too large.'), { status: 413 })); req.destroy(); } else chunks.push(chunk); });
-    req.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch { reject(Object.assign(new Error('The request body is not JSON.'), { status: 400 })); } });
-    req.on('error', reject);
+    if (Number(req.headers['content-length']) > limit) return reject(refusal('The request is too large.', 413));
+    let size = 0, settled = false, timer = null; const chunks = [];
+    const settle = (fn, value) => { if (settled) return; settled = true; clearTimeout(timer); fn(value); };
+    const wait = () => { clearTimeout(timer); timer = setTimeout(() => settle(reject, refusal('The request took too long to arrive.', 408)), timeout); timer.unref?.(); };
+    wait();
+    req.on('data', chunk => {
+      if (settled) return;
+      size += chunk.length; wait();
+      if (size > limit) settle(reject, refusal('The request is too large.', 413)); else chunks.push(chunk);
+    });
+    req.on('end', () => { try { settle(resolve, JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch { settle(reject, refusal('The request body is not JSON.', 400)); } });
+    req.on('error', error => settle(reject, error));
+    req.on('close', () => settle(reject, refusal('The request ended early.', 400)));
   });
 }
 
@@ -96,29 +109,43 @@ function readBody(req, limit) {
  * @param {Record<string, (data: object, req: object) => any>} options.operations the host's table
  * @param {string} [options.key] default: a new key
  * @param {string} [options.prefix] default '/agent/'
- * @param {number} [options.maxBody] bytes; default 2,000,000
- * @returns {{key: string, handle: (req, res) => Promise<boolean>}} `handle` resolves false,
+ * @param {number} [options.maxBody] bytes; default 2,000,000. A larger body is answered with 413
+ * @param {number} [options.bodyTimeout] milliseconds a body may stop arriving for before it is answered with 408; default 30000
+ * @returns {{key: string, rotate: () => string, handle: (req, res) => Promise<boolean>}} `rotate` makes a new key
+ *   (the old one stops working at once; write the session file again). `handle` resolves false,
  *   having done nothing, when the path is not under the prefix; otherwise it answers and
  *   resolves true. A request that fails the checks gets a plain 404, the same as an unknown path.
  *   An operation that throws answers `{ error }` with the error's `status` (default 500);
  *   only errors that carry a status have their message passed on.
  */
-export function createCommandEndpoint({ port, operations, key = issueKey(), prefix = '/agent/', maxBody = 2_000_000 }) {
+export function createCommandEndpoint({ port, operations, key = issueKey(), prefix = '/agent/', maxBody = 2_000_000, bodyTimeout = 30000 }) {
   const table = new Map(Object.entries(operations || {}));
-  const send = (res, status, value) => { const body = JSON.stringify(value); res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store' }); res.end(body); };
-  return { key, async handle(req, res) {
-    const pathname = new URL(req.url, 'http://localhost').pathname;
+  let current = key;
+  // A refusal closes the connection once it is sent: whatever of the body is still on its way is not read.
+  const send = (res, status, value, close = false) => {
+    const body = JSON.stringify(value);
+    res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store', ...(close ? { connection: 'close' } : {}) });
+    res.end(body);
+  };
+  return { get key() { return current; }, rotate() { current = issueKey(); return current; }, async handle(req, res) {
+    let pathname;
+    try { pathname = new URL(req.url, 'http://localhost').pathname; }
+    catch {
+      // Not a path this server could have meant. If it mentions the prefix it gets the same plain 404 as any stranger.
+      if (!String(req.url).includes(prefix)) return false;
+      return send(res, 404, { error: 'Not found.' }), true;
+    }
     if (!pathname.startsWith(prefix)) return false;
     try {
       const operation = table.get(pathname.slice(prefix.length));
-      if (!verifyRequest(req, { key, port: typeof port === 'function' ? port() : port }) || !operation) return send(res, 404, { error: 'Not found.' }), true;
+      if (!verifyRequest(req, { key: current, port: typeof port === 'function' ? port() : port }) || !operation) return send(res, 404, { error: 'Not found.' }), true;
       if (req.method !== 'POST' || !req.headers['content-type']?.startsWith('application/json')) return send(res, 405, { error: 'Use a JSON POST request.' }), true;
-      const data = await readBody(req, maxBody);
+      const data = await readBody(req, maxBody, bodyTimeout);
       if (!data || typeof data !== 'object' || Array.isArray(data)) return send(res, 400, { error: 'Send a JSON object.' }), true;
       send(res, 200, await operation(data, req) ?? {});
     } catch (error) {
       const status = Number.isInteger(error?.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
-      if (!res.headersSent) send(res, status, { error: Number.isInteger(error?.status) ? String(error.message) : 'The command failed.' });
+      if (!res.headersSent && !res.destroyed) try { send(res, status, { error: Number.isInteger(error?.status) ? String(error.message) : 'The command failed.' }, status === 413 || status === 408); } catch { /* the connection has gone */ }
     }
     return true;
   } };

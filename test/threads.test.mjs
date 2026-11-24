@@ -113,3 +113,28 @@ test('a host can keep threads in storage of its own', async () => {
   assert.equal(kept.get('repo/page').threads[0].messages[0].text, 'Kept elsewhere.');
   assert.equal(threads.get('repo/page', 1).anchor.post, 3);
 });
+
+// ---------------------------------------------------------------- hardening
+
+test('a threads file that cannot be parsed is moved aside and reported; the document can have threads again', async t => {
+  const errors = [];
+  const { dir, threads } = await setup(t, { onError: e => errors.push(e) });
+  const { writeFile, readdir } = await import('node:fs/promises');
+  threads.create('doc', { anchor: { at: 1 }, author: ada, text: 'kept' });
+  await writeFile(path.join(dir, 'doc.threads.json'), '{ "next": 2, "threads": [ { "id": 1, "mess');
+  assert.deepEqual(threads.list('doc'), []);
+  assert.equal(threads.create('doc', { anchor: { at: 2 }, author: ada, text: 'new' }).id, 1);
+  const aside = (await readdir(dir)).find(name => name.startsWith('doc.threads.json.corrupt-'));
+  assert.match(await readFile(path.join(dir, aside), 'utf8'), /"mess$/);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].code, 'corrupt');
+});
+
+test('thread data in an unexpected form does not break listing or replying', async t => {
+  const { dir, threads } = await setup(t);
+  const { writeFile } = await import('node:fs/promises');
+  await writeFile(path.join(dir, 'doc.threads.json'), JSON.stringify({ next: 5, threads: [null, 'text', { id: 3, status: 'open', messages: 'none' }, { id: 4, anchor: {}, status: 'open', messages: [{ author: { name: 'Ada' }, text: 'ok' }] }] }));
+  assert.deepEqual(threads.list('doc').map(thread => thread.id), [3, 4]);
+  assert.equal(threads.reply('doc', 3, { author: ada, text: 'still works' }).messages.length, 1);
+  assert.equal(threads.reply('doc', 4, { author: scout, text: 'yes' }).messages.length, 2);
+});

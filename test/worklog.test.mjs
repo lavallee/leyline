@@ -89,3 +89,41 @@ test('the trail records what changed while nobody watched', async t => {
   const now = Date.parse('2026-11-23T12:00:00Z');
   assert.deepEqual([sinceMs('2h', now), sinceMs('1d', now), sinceMs('1700000000000'), sinceMs(undefined)], [now - 7200e3, now - 86400e3, 1700000000000, 0]);
 });
+
+// ---------------------------------------------------------------- hardening
+
+test('shapeOf cannot be made to run away by code an agent wrote', () => {
+  const cases = ['x = /' + '[a]'.repeat(400), 'x = /' + '[a]'.repeat(400) + '/g', '/*'.repeat(10000), '`' + '${a}'.repeat(5000), "'" + '\\'.repeat(9999), 'return /' + 'a\\'.repeat(5000), '(/' + '['.repeat(10000)];
+  for (const code of cases) {
+    const began = performance.now();
+    assert.equal(typeof shapeOf(code), 'string');
+    assert.ok(performance.now() - began < 5000, `${code.slice(0, 12)}… took ${Math.round(performance.now() - began)} ms`);
+  }
+  assert.equal(shapeOf('const ok = /[a/]+b/g.test(x); // note'), 'const ok = R.test(x);', 'a regular expression with a class is still reduced');
+});
+
+test('an entry cut short by a crash costs only itself, not the entry written after it', async t => {
+  const dir = await tempDir(t), file = path.join(dir, 'work.jsonl');
+  const log = createWorkLog({ file });
+  log.record({ doc: 'd', code: 'first()', changes: { added: 1 } });
+  await appendFile(file, '{"t":"2026-11-23T10:00:00.000Z","doc":"d","kind":"exec","code":"cut sho');
+  log.record({ doc: 'd', code: 'after()', changes: { added: 1 } });
+  assert.deepEqual(log.read().map(e => e.code), ['first()', 'after()']);
+  const trail = createTrail({ dir });
+  trail.record('doc', { source: 'agent', what: 'one', changes: { added: ['a'] } });
+  await appendFile(path.join(dir, 'doc.trail.jsonl'), '{"t":"cut');
+  trail.record('doc', { source: 'agent', what: 'two', changes: { added: ['b'] } });
+  assert.deepEqual(trail.read('doc').map(e => e.what), ['one', 'two']);
+});
+
+test('a trail does not grow without bound: it rotates once, like the work log', async t => {
+  const dir = await tempDir(t);
+  const trail = createTrail({ dir, maxBytes: 2000 });
+  for (let i = 0; i < 200; i++) trail.record('doc', { source: 'agent', what: `change ${i}`, changes: { updated: [`part-${i}`] } });
+  const sizes = await Promise.all((await readdir(dir)).map(async name => [name, (await stat(path.join(dir, name))).size]));
+  assert.deepEqual(sizes.map(([name]) => name).sort(), ['doc.trail.1.jsonl', 'doc.trail.jsonl']);
+  assert.ok(sizes.every(([, size]) => size < 2600), JSON.stringify(sizes));
+  const kept = trail.read('doc').map(e => e.what);
+  assert.equal(kept.at(-1), 'change 199');
+  assert.ok(kept.length > 5 && kept.length < 200, `the newest entries are kept across the rotation: ${kept.length}`);
+});

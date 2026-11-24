@@ -110,3 +110,20 @@ return { summary: 'done' }
   assert.equal(hash.parse('x', '# routine: In Python\n# kind: check\nprint(1)\n').title, 'In Python');
   assert.equal(jsonFormat.parse('n', '{"title":"T"}').name, 'n');
 });
+
+// ---------------------------------------------------------------- hardening
+
+test('a routine file that cannot be read as a routine is left out and reported; the menu still works', async t => {
+  const dir = await tempDir(t), banked = path.join(dir, 'routines'), problems = [];
+  await mkdir(banked);
+  await writeFile(path.join(banked, 'broken.json'), '{ "title": "Half');
+  await writeFile(path.join(banked, 'untitled.json'), '{}');
+  await writeFile(path.join(banked, 'number.json'), JSON.stringify({ title: 7, code: 'x' }));
+  await writeFile(path.join(banked, 'list.json'), '[1]');
+  await writeFile(path.join(banked, 'good.json'), JSON.stringify({ title: 'Good', code: 'Do the good thing.' }));
+  const set = createRoutineSet({ shipped: SHIPPED, bankedDir: banked, engines: ['page'], onError: e => problems.push(e.message) });
+  assert.deepEqual(set.list().map(r => [r.name, r.title]), [['good', 'Good'], ['number', 'number'], ['proofread', 'Proofread'], ['tighten', 'Tighten']], 'a title that is not text falls back to the name');
+  assert.equal(set.resolve('/good').code, 'Do the good thing.');
+  assert.deepEqual(set.turnFor('just words'), { user: 'just words', prompt: 'just words' });
+  assert.ok(problems.length >= 3 && problems.some(m => m.includes('broken.json')), `${problems}`);
+});
