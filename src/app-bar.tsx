@@ -37,15 +37,15 @@ export function AppBar({ product, productHref, productTitle, title, titleHint, l
 		<header data-slot="app-bar" className={cn('toucan-ui z-[700] flex h-11 shrink-0 items-center gap-1.5 border-b bg-background px-3 text-sm', className)}>
 			<ContainerContext.Provider value={container ?? null}>
 				{productHref ? (
-					<a href={productHref} className="font-semibold tracking-tight outline-none hover:opacity-70 focus-visible:underline" title={productTitle}>
+					<a href={productHref} className="font-semibold tracking-tight outline-none hover:opacity-70 focus-visible:underline max-sm:hidden" title={productTitle}>
 						{product}
 					</a>
 				) : (
-					<span className="font-semibold tracking-tight" title={productTitle}>
+					<span className="font-semibold tracking-tight max-sm:hidden" title={productTitle}>
 						{product}
 					</span>
 				)}
-				<span aria-hidden className="text-muted-foreground/60">
+				<span aria-hidden className="text-muted-foreground/60 max-sm:hidden">
 					/
 				</span>
 				<span className="min-w-0 truncate font-medium" title={titleHint}>

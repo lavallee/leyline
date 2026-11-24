@@ -22,7 +22,7 @@ Copycat's live page sit behind the same History panel.
 
 ## The conventions
 
-- **The strip** is 44px at the top: the product's name, a `/`, the document's title and a
+- **The strip** is 44px at the top: the product's name and a `/` (both hidden on a phone), the document's title and a
   live dot (green synced, red offline), then a spacer, then actions. Each action is a
   ghost button with a lucide icon and a label that hides below 1024px; the chat toggle
   comes last, outlined. On a phone actions that do not fit go into a More menu.
