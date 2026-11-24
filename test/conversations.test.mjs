@@ -445,7 +445,7 @@ test('stopGrace: a run that never settles is recorded as stopped and its lane fr
   await store.stop('k', stuck.id);
   await settled(stuck); await settled(next);
   assert.deepEqual([stuck.status, next.status, next.lane], ['stopped', 'succeeded', 'main']);
-  await sleep(250);
+  await until(() => late.length === 1);
   assert.deepEqual(late, [null], 'activity from an abandoned run is not recorded');
   assert.deepEqual(stuck.activities, []);
 });
@@ -501,7 +501,7 @@ test('random interleavings of send, stop, reset, save and restart keep the store
       if (next() < 0.5) await sleep(Math.floor(next() * 3)); else await ticks(Math.floor(next() * 6));
       for (const k of keys) if (store.lanes(k).length > 3) problems.push('more lanes than the cap');
     }
-    await until(() => { for (const gate of gates) gate.resolve(); gates.clear(); return keys.every(key => !store.busy(key)); }, 5000);
+    await until(() => { for (const gate of gates) gate.resolve(); gates.clear(); return keys.every(key => !store.busy(key)); }, 60000);
     await store.flush(); await sleep(10); await store.flush();
     // Memory and disk agree, nothing is left unfinished, and every request the store accepted is in its conversation or an archive.
     const kept = new Set();

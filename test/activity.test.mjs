@@ -71,13 +71,13 @@ test('claims expire, cover a part’s sub-parts, and the host’s own changes ar
 test('touched settles after changes pause, and waits for a run in flight to claim its work', async () => {
   let running = true;
   const docs = { page: { p1: 'a' } };
-  const feed = createActivityFeed({ snapshot: doc => ({ ...docs[doc] }), diff, quietMs: 15, maxWaitMs: 200, claimMs: 300, busy: () => running });
+  const feed = createActivityFeed({ snapshot: doc => ({ ...docs[doc] }), diff, quietMs: 15, maxWaitMs: 200, claimMs: 9000, busy: () => running });   // a run's claim is waited for up to a third of claimMs: long enough that a slow machine cannot use it up
   feed.open('page'); feed.pending('chat', 'page');
   docs.page.p1 = 'b'; feed.touched('page');
   await new Promise(r => setTimeout(r, 50));
   assert.equal(feed.seq, 0, 'a run is in flight: wait for its claim');
   feed.claim('page', scout, ['p1']); running = false;
-  await new Promise(r => setTimeout(r, 60));
+  for (const end = Date.now() + 20000; feed.seq !== 1 && Date.now() < end;) await new Promise(r => setTimeout(r, 5));
   assert.equal(feed.seq, 1);
   assert.equal(feed.pending('chat', 'page').events[0].actor.name, 'Scout');
   docs.page.p1 = 'c'; feed.touched('page'); feed.close('page');

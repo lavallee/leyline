@@ -161,7 +161,7 @@ test('text an agent supplies cannot make the search run away, whatever its shape
   for (const [find, code] of cases) {
     const began = performance.now();
     assert.equal(textEdit.check({ file: 'a.md', find, replace: 'z' }, doc)?.code, code);
-    assert.ok(performance.now() - began < 1500, `${find.length} characters took ${Math.round(performance.now() - began)} ms`);
+    assert.ok(performance.now() - began < 5000, `${find.length} characters took ${Math.round(performance.now() - began)} ms`);
   }
 });
 

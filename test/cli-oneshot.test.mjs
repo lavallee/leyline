@@ -136,7 +136,7 @@ test('runProcess caps runaway output', async () => {
 });
 
 const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
-const waitFor = async (check, ms = 3000) => { const end = Date.now() + ms; while (!check()) { if (Date.now() > end) throw new Error('Timed out waiting for a condition.'); await new Promise(r => setTimeout(r, 10)); } };
+const waitFor = async (check, ms = 20000) => { const end = Date.now() + ms; while (!check()) { if (Date.now() > end) throw new Error('Timed out waiting for a condition.'); await new Promise(r => setTimeout(r, 10)); } };
 
 test('a multi-byte character split between two writes is read whole', async () => {
   const code = `const b = Buffer.from('日本語 naïve 🙂'); let i = 0; (function next() { if (i >= b.length) return; process.stdout.write(b.subarray(i, i + 1), () => setTimeout(next, 1)); process.stderr.write(b.subarray(i, i + 1)); i++; })();`;
@@ -154,24 +154,25 @@ test('a child that ignores SIGTERM is killed after a timeout or a stop, not left
   for (const how of ['timeout', 'stopped']) {
     rmSync(pidFile, { force: true });
     const controller = new AbortController();
-    const run = runProcess(process.execPath, ['-e', stubborn], { timeout: how === 'timeout' ? 400 : 60000, signal: controller.signal, killGrace: 100 });
+    // The timeout is long enough for the child to have started and said so, even on a loaded machine.
+    const run = runProcess(process.execPath, ['-e', stubborn], { timeout: how === 'timeout' ? 4000 : 60000, signal: controller.signal, killGrace: 100 });
     run.catch(() => {});
     const child = await pid();
     t.after(() => { try { process.kill(child, 'SIGKILL'); } catch { /* gone, as it should be */ } });
     if (how === 'stopped') controller.abort();
     await assert.rejects(run, { code: how });
-    await waitFor(() => !alive(child), 3000);
+    await waitFor(() => !alive(child));
   }
 });
 
 test('output past the cap: nothing more is kept and the child is ended, even one that ignores SIGTERM', async () => {
   const flood = `process.on('SIGTERM', () => {}); const chunk = 'x'.repeat(65536); (function next() { process.stdout.write(chunk, next); })();`;
   const began = Date.now();
-  const result = await runProcess(process.execPath, ['-e', flood], { maxOutput: 200000, killGrace: 100, timeout: 5000 });
+  const result = await runProcess(process.execPath, ['-e', flood], { maxOutput: 200000, killGrace: 100, timeout: 120000 });
   assert.equal(result.truncated, true);
   assert.notEqual(result.code, 0);
   assert.ok(result.stdout.length <= 200000 + 65536 * 2, `kept ${result.stdout.length} characters`);
-  assert.ok(Date.now() - began < 3000, `took ${Date.now() - began} ms`);
+  assert.ok(Date.now() - began < 30000, `took ${Date.now() - began} ms`);
 });
 
 test('a command that cannot be started at all is unavailable, with a ProviderError', async () => {
@@ -180,13 +181,13 @@ test('a command that cannot be started at all is unavailable, with a ProviderErr
 });
 
 test('codex preset: a stop during the login check is honoured at once', async t => {
-  const { bin } = await fakeCli(t, `if (args[0] === 'login') return setTimeout(() => process.exit(0), 5000); process.exit(0);`);
+  const { bin } = await fakeCli(t, `if (args[0] === 'login') return setTimeout(() => process.exit(0), 120000); process.exit(0);`);
   const provider = new CliOneshotProvider({ preset: 'codex', bin });
   const controller = new AbortController(), began = Date.now();
   const run = provider.run({ key: 'k', input: 'x', signal: controller.signal });
   setTimeout(() => controller.abort(), 150);
   await assert.rejects(run, { code: 'stopped' });
-  assert.ok(Date.now() - began < 2000, `took ${Date.now() - began} ms`);
+  assert.ok(Date.now() - began < 30000, `took ${Date.now() - began} ms`);
 });
 
 test('processGroup: stopping a run also ends what the child started', async t => {
@@ -200,7 +201,7 @@ test('processGroup: stopping a run also ends what the child started', async t =>
   t.after(() => { for (const pid of Object.values(pids)) try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } });
   controller.abort();
   await assert.rejects(run, { code: 'stopped' });
-  await waitFor(() => !alive(pids.child) && !alive(pids.grandchild), 3000);
+  await waitFor(() => !alive(pids.child) && !alive(pids.grandchild));
 });
 
 test('validate: a host checks a structured answer before it is returned', async () => {

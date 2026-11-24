@@ -74,7 +74,9 @@ test('close() ends a child that ignores SIGTERM', async t => {
   await once(rpc, 'notification');
   const exited = once(proc, 'exit');
   rpc.close();
-  const [, signal] = await Promise.race([exited, new Promise((_, reject) => setTimeout(() => { proc.kill('SIGKILL'); reject(new Error('the child outlived close()')); }, 3000))]);
+  let giveUp;
+  const [, signal] = await Promise.race([exited, new Promise((_, reject) => { giveUp = setTimeout(() => { proc.kill('SIGKILL'); reject(new Error('the child outlived close()')); }, 30000); })]);
+  clearTimeout(giveUp);
   assert.equal(signal, 'SIGKILL');
 });
 
@@ -127,7 +129,7 @@ test('children are stopped when the host process exits', async t => {
   await once(host, 'exit');
   const pid = Number(await readFile(pidFile, 'utf8'));
   t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch { /* gone, as it should be */ } });
-  await until(() => !alive(pid), 3000);
+  await until(() => !alive(pid));
 });
 
 test('lines that are not JSON are offered to a listener instead of vanishing', async t => {
@@ -147,5 +149,5 @@ test('processGroup: close() also ends what the child started', async t => {
   t.after(() => { for (const pid of Object.values(pids)) try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } });
   assert.ok(alive(pids.child) && alive(pids.grandchild));
   rpc.close();
-  await until(() => !alive(pids.child) && !alive(pids.grandchild), 3000);
+  await until(() => !alive(pids.child) && !alive(pids.grandchild));
 });

@@ -20,7 +20,9 @@ export async function tempDir(t, prefix = 'kit-test-') {
   return dir;
 }
 export const readLines = async file => (await readFile(file, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(line => JSON.parse(line));
-export const until = async (test, ms = 3000) => {
+// The default wait is long on purpose: it is only ever used up by a test that is failing,
+// and a loaded machine can take seconds to start a child process.
+export const until = async (test, ms = 20000) => {
   const end = Date.now() + ms;
   while (!(await test())) { if (Date.now() > end) throw new Error('Timed out waiting for a condition.'); await new Promise(r => setTimeout(r, 5)); }
 };

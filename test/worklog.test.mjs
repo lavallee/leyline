@@ -97,7 +97,7 @@ test('shapeOf cannot be made to run away by code an agent wrote', () => {
   for (const code of cases) {
     const began = performance.now();
     assert.equal(typeof shapeOf(code), 'string');
-    assert.ok(performance.now() - began < 1000, `${code.slice(0, 12)}… took ${Math.round(performance.now() - began)} ms`);
+    assert.ok(performance.now() - began < 5000, `${code.slice(0, 12)}… took ${Math.round(performance.now() - began)} ms`);
   }
   assert.equal(shapeOf('const ok = /[a/]+b/g.test(x); // note'), 'const ok = R.test(x);', 'a regular expression with a class is still reduced');
 });

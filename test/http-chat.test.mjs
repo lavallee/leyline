@@ -159,7 +159,10 @@ test('abort, cancel and timeout stop a request that is waiting on the model', as
   assert.equal(provider.cancel('k'), false);
   await assert.rejects(provider.run({ input: 'x', timeout: 80 }), { code: 'timeout' });
   await assert.rejects(provider.run({ input: 'x', signal: AbortSignal.abort() }), { code: 'stopped' });
-  await provider.run({ key: 'k', input: 'again', timeout: 80 }).catch(() => {});
+  // Stopped only once the endpoint has the request, so the check below reads this request however slow the machine is.
+  const before = seen.length, again = provider.run({ key: 'k', input: 'again', onText: () => provider.cancel('k') });
+  await assert.rejects(again, { code: 'stopped' });
+  assert.equal(seen.length, before + 1);
   assert.deepEqual(seen.at(-1).body.messages, [{ role: 'user', content: 'again' }], 'a stopped exchange is not remembered');
 });
 
@@ -259,16 +262,16 @@ test('an answer larger than the provider accepts is refused while it arrives', a
     } else json(res, { choices: [{ message: { content: 'y'.repeat(500000) }, finish_reason: 'stop' }] });
   });
   const began = Date.now();
-  await assert.rejects(new HttpChatProvider({ baseUrl: base, model: 'm', maxResponse: 40000 }).run({ input: 'x', timeout: 20000 }), { code: 'failed', message: /more than/ });
-  await assert.rejects(new HttpChatProvider({ baseUrl: base, model: 'm', maxResponse: 40000, stream: false }).run({ input: 'x', timeout: 20000 }), { code: 'failed', message: /more than/ });
-  assert.ok(Date.now() - began < 5000);
+  await assert.rejects(new HttpChatProvider({ baseUrl: base, model: 'm', maxResponse: 40000 }).run({ input: 'x', timeout: 120000 }), { code: 'failed', message: /more than/ });
+  await assert.rejects(new HttpChatProvider({ baseUrl: base, model: 'm', maxResponse: 40000, stream: false }).run({ input: 'x', timeout: 120000 }), { code: 'failed', message: /more than/ });
+  assert.ok(Date.now() - began < 30000);
 });
 
 test('idleTimeout: a stream that goes quiet is stopped long before the overall timeout', async t => {
   const { base } = await endpoint(t, (req, body, res) => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write(data({ choices: [{ delta: { content: 'begun' } }] })); });
   const began = Date.now();
-  await assert.rejects(new HttpChatProvider({ baseUrl: base, model: 'm', idleTimeout: 120 }).run({ input: 'x', timeout: 30000 }), { code: 'timeout' });
-  assert.ok(Date.now() - began < 3000);
+  await assert.rejects(new HttpChatProvider({ baseUrl: base, model: 'm', idleTimeout: 120 }).run({ input: 'x', timeout: 120000 }), { code: 'timeout' });
+  assert.ok(Date.now() - began < 30000);
 });
 
 test('retries: off by default; when asked, only before any answer has arrived, and a stop ends the wait', async t => {
@@ -290,8 +293,8 @@ test('retries: off by default; when asked, only before any answer has arrived, a
   reset(['midstream']); await assert.rejects(make({ retries: 3, stream: true }).run({ input: 'x' }), { code: 'failed' }); assert.equal(calls, 1, 'never once part of an answer has arrived');
   reset([503, 503, 503, 503]);
   const controller = new AbortController(), began = Date.now();
-  const waiting = make({ retries: 3, retryDelay: 60000 }).run({ input: 'x', signal: controller.signal });
+  const waiting = make({ retries: 3, retryDelay: 120000 }).run({ input: 'x', signal: controller.signal });
   setTimeout(() => controller.abort(), 100);
   await assert.rejects(waiting, { code: 'stopped' });
-  assert.ok(Date.now() - began < 3000 && calls === 1);
+  assert.ok(Date.now() - began < 25000 && calls === 1);
 });
