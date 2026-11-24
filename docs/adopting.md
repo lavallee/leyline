@@ -1,5 +1,11 @@
 # Moving a host onto the package
 
+> **Status, 2026-11-23.** Copycat runs on Leyline 0.5.0 for its chat panel, live agent,
+> one-shot agents, conversation store, routines, proposal bookkeeping and command
+> endpoint. Skein uses 0.5.0 for the chat panel, the JSON-RPC transport and the routine
+> bank, with its own conversation code unchanged. Toucan has not adopted it: its chat
+> needs steering of a running turn and approvals shown to a person, which Leyline lacks.
+
 Steps for Copycat, Skein and Toucan, written from reading their code on 2026-11-23.
 Each is a change to another repository, to be made and tested there. File and function
 names are the hosts' own.
