@@ -10,7 +10,8 @@
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "bench": "node bench/run.mjs",
-    "check": "for f in server/*.mjs server/providers/*.mjs src/*.mjs test/*.mjs test/fixtures/*.mjs bench/*.mjs bench/fixtures/*.mjs; do node --check \"$f\" || exit 1; done"
+    "soak": "node test/soak/soak.mjs",
+    "check": "for f in server/*.mjs server/providers/*.mjs src/*.mjs test/*.mjs test/fixtures/*.mjs test/soak/*.mjs bench/*.mjs bench/fixtures/*.mjs; do node --check \"$f\" || exit 1; done"
   },
   "exports": {
     ".": "./src/index.tsx",
