@@ -52,6 +52,22 @@ Copycat's live page sit behind the same History panel.
 
 The first three each end with the host's own tests and a look in a browser.
 
+**Where it stands (2026-11-24).** 1–3 are done on branches: Leyline `shell`, Toucan
+`leyline-shell`, Copycat `shell`, each pinned to the same Leyline revision. Still open:
+
+- **Copycat on a phone** keeps its bar at the bottom (reading mode, the block row, the
+  keyboard-aware layout that `tests/mobile-browser.js` pins). Moving it to the strip
+  needs trying on a real phone. On a phone the strip's title gets very little room.
+- **Copycat's own panels** (Review, Comments, Chapters, Publish, the Agent panel) are
+  still the editor's plain DOM, restyled under the strip, not `SidePanel`. Moving them
+  into the shell is the next step toward no second look.
+- **Copycat's History shows no preview** of a version; choosing one offers to put it back
+  into the draft. A preview could draw the version's Markdown as the live page does.
+- **Toucan's chat panel** (`app/Chat.tsx`) is still its own; Copycat already uses this
+  package's `ChatHeader`, `ChatComposer` and `Conversation`.
+- **Deck pages** in Copycat get the strip over the top of the slide rather than pushing
+  the page down, since a deck fills the screen.
+
 ## A host in a shadow root
 
 Copycat draws the shell and the chat inside shadow roots, so a page's styles cannot reach
