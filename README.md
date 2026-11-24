@@ -159,7 +159,18 @@ What it does for every host:
 - Every agent message but the last is reported as an "Agent note" activity. The last is
   the reply.
 - A run past its `timeout` is interrupted and its thread dropped, so the next run on that
-  key starts fresh.
+  key starts fresh. `idleTimeout` on a run does the same when the agent has said nothing
+  about it for that long.
+- A stop is bounded. If the agent has not confirmed an interrupt within `stopGrace`
+  (10 seconds by default) the run ends as `stopped` anyway and its thread is forgotten,
+  since nobody knows what state it is in.
+- A key is taken from the moment `run()` is called: a second run on it is refused with
+  `busy` even while the first is still starting its thread.
+- What the child sends is treated as data. A line that is not a JSON object, a
+  notification in an unexpected form, or a line over `maxLine` (64 MB) is skipped, never
+  thrown. The child's stderr is always drained.
+- `close()` sends SIGTERM, then SIGKILL after `killGrace` (2 seconds). With
+  `processGroup: true` both go to the child's whole process group.
 
 ### cli-oneshot
 
@@ -191,6 +202,16 @@ const { message, data } = await claude.run({
   from stdout. No flags are added; what that command may do is the host's decision.
 - The child sees a short allowlist of environment variables (`ENV_KEYS`), not the host's
   environment. Add names with `envKeys`.
+
+- A run that is stopped, times out or floods its output has its process ended: SIGTERM,
+  then SIGKILL after two seconds (`killGrace` on `runProcess`). `processGroup: true`
+  signals the CLI's whole process group, so what it started stops with it; it is off by
+  default because a child in its own group no longer receives a Ctrl-C typed at the
+  host's terminal.
+- `run({ json: true, validate })` hands the parsed answer to the host's own check before
+  it is returned. Return `false` or a reason, or throw, to fail the run; return an object
+  to use a repaired copy. `outputSchema` is enforced by Codex only, so this is where the
+  other presets' answers are checked.
 
 `runProcess` and `parseJsonAnswer` are exported for hosts that want them alone.
 
@@ -236,7 +257,22 @@ await local.run({ messages: [{ role: 'user', content: 'Hello' }] });
 - **Text only.** There is no tool loop: the model can read only what the host puts in the
   messages and cannot act. Giving it the host's command table as tools is not built.
 - Memory under a `key` lives in the process and is lost on restart. `maxHistory` caps it
-  (40 messages by default).
+  (40 messages by default) and `maxKeys` caps how many keys are remembered (1,000; the
+  one used longest ago is forgotten first).
+- **Timeouts.** `timeout` on a run (5 minutes by default) covers everything, retries
+  included. `idleTimeout` on the provider stops a request that has gone quiet: no byte
+  for that long, before the first one or between chunks. It is off by default. Node's
+  own `fetch` also gives up after 10 seconds connecting and after 5 minutes without
+  response headers or without a chunk, whatever these are set to.
+- **Retries** are off by default. With `retries: n` a request is sent again, up to `n`
+  times, when the endpoint could not be reached or answered 408, 429 or 5xx, and only
+  before any part of an answer has arrived. The wait doubles from `retryDelay` (500 ms)
+  or follows `Retry-After`, up to 30 seconds, and a stop ends it. The request is a POST
+  sent again whole: an endpoint that failed after doing the work may bill for it twice.
+- **A stream that stops part-way is an error** (`unavailable`), not a short answer: a
+  reply counts only once the endpoint has sent a finish reason or its end marker.
+- An answer over `maxResponse` characters (16 million by default) is refused while it
+  arrives, as is any single stream event that large.
 
 This adapter is tested against a local HTTP server that imitates both wires. It has not
 been run against a real provider.
@@ -279,14 +315,33 @@ await store.reset('page-42');             // archives the old turns first
   busy gets a side lane with a fresh id: a fresh agent. `maxLanes` caps how many run at
   once per conversation; the rest wait in order. `maxLanes: 1` is a strict queue.
 - **Storage.** One JSON file per conversation, mode 0600, in a 0700 folder. Each write
-  goes to a temporary file that is renamed into place. A key that is not plainly safe as
-  a file name is stored under a hash of it.
+  goes to a temporary file of its own that is renamed into place. A key that is not
+  plainly safe as a file name is stored under a hash of it. Each conversation has its
+  own write queue, and writes that pile up behind one in progress are merged into one.
+  `fsync: true` flushes each file before the rename (see Guarantees and limits).
+- **A file that cannot be used is never written over.** One that does not parse, is not
+  a conversation, or holds another key is renamed to `<name>.corrupt-<time>` (or
+  `.foreign-<time>`) and reported through `onError` with `code: 'corrupt'` and the new
+  path in `file`; the conversation then starts empty. One that cannot be read at all (a
+  permission or I/O error) fails `open()` with `code: 'unreadable'`, changes nothing, and
+  is tried again on the next call.
 - **Recovery.** A turn left `running` or `queued` by a process that died is marked
   `failed` when the conversation is next opened, with a message asking the person to
   send it again.
-- **Stop.** A waiting request is removed. A running one has its `signal` aborted and is
-  recorded as `stopped` even if `run` ignores the signal.
-- `reset` copies the old turns to `archive/` and refuses while anything is running.
+- **Stop.** A waiting request is removed, including one still being written by `send`. A
+  running one has its `signal` aborted and is recorded as `stopped` even if `run`
+  ignores the signal; that record waits for `run` to return unless `stopGrace` is set,
+  after which the lane is freed and whatever the run does later is dropped.
+- **Sending twice.** `send(key, { requestId, … })` returns the turn an earlier send with
+  the same `requestId` made, in this process or after a restart, so a browser's retry
+  does not run a request a second time.
+- `reset` copies the old turns to `archive/` and refuses while anything is running,
+  waiting or on its way in. A send that arrives during a reset joins the new conversation.
+- `close()` stops everything, writes it, and after that the store takes no more requests
+  (`send` is refused with `code: 'closed'`) and writes nothing.
+- **Memory.** A conversation stays in memory once opened. `unload(key)` drops an idle one
+  and `evictAfter` does so by itself after a quiet period. Leave `evictAfter` unset if the
+  host keeps conversation objects: after an eviction `open()` returns a new one.
 - `store.running(laneId)` returns the turn at work in a lane. A host's command route
   uses it to find which turn an agent's command belongs to.
 - All wording can be replaced through `messages`. `stopped`, `removed` and `interrupted`
@@ -335,6 +390,12 @@ its bearer key matches, compared in constant time. Anything else gets the same p
 as an unknown path. The session file is `<state dir>/<app>/<name>.json` (the state
 directory is `$XDG_STATE_HOME` or `~/.local/state`), mode 0600, replaced by rename.
 `call()` refuses to send the key anywhere but a loopback address.
+
+A body over `maxBody` is answered with 413 (from its declared length when there is one,
+before any of it is read) and one that stops arriving with 408 after `bodyTimeout`
+(30 seconds); both close the connection. The checks run before the body is read, so only
+a caller with the key can send one at all. `endpoint.rotate()` replaces the key without a
+restart: the old one stops working at once, and the host writes the session file again.
 
 What this protects against: web pages (which cannot avoid sending `Origin` on such a
 request and cannot read the file) and other machines. It does not protect against other
@@ -693,11 +754,89 @@ file, and its Tailwind source path if that names the package folder.
 
 `docs/adopting.md` has the steps for Copycat, Skein and Toucan, module by module.
 
+## Guarantees and limits
+
+What the server modules promise, and what they do not. The tests named are in `test/`.
+
+**Durability.**
+
+- A write replaces a file whole (temporary file, then rename), so a reader, or a process
+  that starts after a crash, sees the old file or the new one and never part of either.
+  `npm run soak` kills a process that is using the conversation store, over and over,
+  and checks exactly this.
+- If the process dies, what is lost is what had not been written yet: activity from the
+  last `saveDelay` (600 ms by default) and, for turns that were running or waiting, the
+  work itself; those turns are marked failed on the next open. A turn's final status is
+  written before `onCall` is called, and `send()` resolves only once the request is on disk.
+- If the machine loses power, a file renamed a moment earlier can come back empty or
+  old, because nothing is flushed by default. `fsync: true` (conversation store, history,
+  threads) flushes the file before the rename and the folder after it. It is slower, and
+  off unless asked for. The work log and trail append one line per write and never flush.
+- A file that will not parse is moved aside and reported, never overwritten or deleted
+  (conversations, history indexes, thread files). Routine and profile files that will not
+  parse are left where they are and left out of the list.
+- **One process per folder.** Nothing is locked. Two processes writing the same
+  conversation folder overwrite each other's changes, whole file at a time. History is
+  the exception only in that it notices what another process wrote.
+
+**Ordering.**
+
+- Requests to one conversation start in the order they were sent. With `maxLanes: 1`
+  they also finish in that order; with more lanes they run side by side and finish when
+  they finish.
+- The main lane holds one turn at a time. A conversation is busy from the moment a
+  request is accepted until its turn has its final status.
+- Activity events are folded in the order the provider delivers them. An activity feed
+  gives each reader events in the order they happened, each once, as long as the reader
+  asks before `keep` newer ones have arrived.
+
+**Memory.** Bounded by default: activities per turn (200) and their text (20,000
+characters each), turns per conversation (200), events per document in an activity feed
+(1,000), messages per thread (500), one line from an agent process (64 MB), a one-shot
+agent's output (4 MB), a model's reply over HTTP (16 million characters), remembered
+HTTP conversations (1,000 keys of 40 messages), a command request's body (2 MB), a work
+log or trail (two files of 8 MB). Not bounded unless the host does something: the
+conversations a store has open (`unload`, `evictAfter`), the documents and readers an
+activity feed knows (`drop`, `forget`), a turn's `message` and the host's own fields, the
+`archive/` folders that resets and removed routines fill, and files moved aside as corrupt.
+
+**Timeouts and stopping.**
+
+| | Overall | Quiet period | Stop |
+| --- | --- | --- | --- |
+| codex-app-server | `timeout`, 15 minutes | `idleTimeout`, off | interrupt, then `stopGrace` (10 s) and the run ends regardless |
+| cli-oneshot | `timeout`, 5 minutes | none | SIGTERM, then SIGKILL after 2 s |
+| http-chat | `timeout`, 5 minutes | `idleTimeout`, off | the request is aborted at once |
+| conversation store | none of its own | none | the signal is aborted; `stopGrace` (off) frees the lane if `run` never returns |
+
+When the host process exits normally its agent children are sent SIGTERM. A host that is
+itself killed runs no code: its children then see only their stdin close.
+
+**Untrusted input.** Agent and model output is parsed as data and checked before use:
+JSON-RPC lines, stream events, structured answers (`validate`), proposal edits. A text
+edit's search takes time proportional to the document plus the text sought, whatever
+either contains. Keys and names a host or a model supplies never become paths: they are
+used as file names only when plainly safe, and hashed otherwise.
+
+**Errors.** Each module raises its own error type with a stable `code` and a message fit
+to show: `ProviderError`, `RpcError`, `ConversationError`, `ProposalError`,
+`RoutineError`, `ThreadError`, `ProfileError`. Callbacks a host supplies (`onEvent`,
+`onText`, `onError`, `onCall`, `onApproval`, `onStderr`) may throw without breaking
+anything. No module calls `process.exit`.
+
+**Not promised.** Exactly-once delivery to an agent (a request interrupted by a crash is
+marked failed and can be sent again; with a `requestId` it is not run twice by a retry of
+the same send). That a child's own children are stopped, unless `processGroup` is set.
+Protection from other programs run by the same user. Anything at all about two hosts
+sharing one state folder.
+
 ## Development
 
 ```sh
 npm test         # node --test; no network, no model calls, no dependencies to install
 npm run check    # node --check over every .mjs file
+npm run bench    # a table of times and peak memory; bench/RESULTS.md has the last one
+npm run soak     # the conversation store, killed and reopened for 30 s (SOAK_SECONDS)
 ```
 
 Tests drive the adapters with stand-ins: a fake app-server (`test/fixtures/`), fake CLIs
@@ -730,6 +869,10 @@ compiled or tested here; consumers build them.
   steering, so an agent hears what changed at its next command or turn.
 - **History is synchronous** (file reads, writes and compression on the calling thread),
   as in Toucan. Large documents saved often will be felt.
+- **The conversation store rewrites a conversation whole.** Writes are batched
+  (`saveDelay`) and merged, but each still costs time in proportion to the conversation:
+  about 10 ms for 200 turns of ordinary size (`bench/RESULTS.md`). An append-only log
+  would remove that and is not built.
 - **`http-chat` has no tools**, so it cannot take the place of an agent that edits
   through commands.
 - Approvals can only be answered by a callback, not shown to a person.

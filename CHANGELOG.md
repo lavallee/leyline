@@ -1,5 +1,114 @@
 # Changelog
 
+## 0.6.0 (2026-11-24)
+
+A hardening pass: an audit of every server module for what goes wrong under a crashing
+child, a damaged file, a hostile answer or a racing request, with a failing test written
+before each fix. Benchmarks (`npm run bench`, figures in `bench/`) and a soak
+(`npm run soak`) are new. The README has a "Guarantees and limits" section. No export
+path or signature was removed; every addition is optional.
+
+Behaviour changes (what a host could notice without opting in to anything):
+
+- `./server/conversations`: a conversation file that does not parse, is not a
+  conversation, or belongs to another key is **moved aside** (`<name>.corrupt-<time>` or
+  `.foreign-<time>`) and reported through `onError`. Before, the next write replaced it.
+- `./server/conversations`: a conversation file that exists but cannot be read (a
+  permission or I/O error) makes `open()` and `send()` reject with `code: 'unreadable'`.
+  Before, it was taken as an empty conversation and then overwritten.
+- `./server/conversations`: `busy()` is true, and `reset()` refused, from the moment a
+  request is accepted, not from the moment it is written. A request stopped (by `stop`,
+  `stopAll` or `close`) while it was still being written no longer runs.
+- `./server/conversations`: after `close()`, `send()` and `reset()` reject with
+  `code: 'closed'` and the store writes nothing more. Before, it carried on.
+- `./server/conversations`: a field called `requestId` on a request now also makes the
+  send safe to repeat: a second send with the same value returns the first turn.
+- `./server/conversations`: `run` is not called for a turn that was stopped before it
+  began; `tools.activity()` returns null once a turn has its final status.
+- `./server/providers/codex-app-server`: a stop the agent does not confirm within
+  `stopGrace` (**default 10 seconds**) ends the run as `stopped` and forgets the thread.
+  Before, the run stayed open until its timeout (15 minutes by default).
+- `./server/providers/codex-app-server`: a second `run()` on a key is refused with `busy`
+  while the first is still starting. An abort while the child or thread is starting
+  rejects at once. Failures before the turn starts are `ProviderError`s (`unavailable`),
+  not plain errors. `onApproval` may return a promise.
+- `./server/rpc`: lines from the child over 64 MB (`maxLine`) are dropped. `close()`
+  rejects waiting calls at once and sends SIGKILL after `killGrace` (2 seconds). Errors
+  are `RpcError`s with a `code`. Stderr is drained even with no listener.
+- `./server/providers/cli-oneshot`: a stopped, timed-out or flooding child is sent SIGKILL
+  two seconds after SIGTERM. `runProcess` keeps no output past `maxOutput` and
+  marks the result `truncated: true`. A command that cannot be spawned rejects with a
+  `ProviderError` (`unavailable`).
+- `./server/providers/http-chat`: a stream that ends with no finish reason and no end
+  marker rejects with `unavailable` ("cut off"). Before, the partial text was returned as
+  the answer. A reply over 16 million characters (`maxResponse`) is refused. A 200 answer
+  that is not JSON is `failed`, not `unavailable`. At most 1,000 keys are remembered
+  (`maxKeys`). Anything in an error message that matches the API key or a configured
+  header value is replaced with `[redacted]`.
+- `./server/commands`: an oversize body is answered with 413 rather than a reset
+  connection; a body that stalls for 30 seconds (`bodyTimeout`) is answered with 408.
+- `./server/worklog`: a trail rotates at 8 MB (`maxBytes`), keeping one older file, as
+  the work log does. Before, it grew without limit.
+- `./server/routine-set`, `./server/routines`: a routine file that is not JSON, or has no
+  `code`, is left out of the list. Before, it made `list()`, `get()`, `resolve()` and
+  `turnFor()` throw. A `name` field inside a file no longer overrides the file's name.
+- `./server/profiles`: a profile file that is not a JSON object is left out and reported
+  in `list().errors`; the source's other profiles are still listed.
+- `./server/threads`, `./server/history`: a threads file or history index that does not
+  parse is moved aside and reported through `onError`; history rebuilds its index from
+  the version files. Before, every later call threw.
+- All child processes are sent SIGTERM when the host process exits normally.
+
+Fixed (each with a test that failed before):
+
+- `./server/rpc`: a line that was JSON but not an object (`null`) threw inside the reader
+  and took the host process down.
+- `./server/providers/codex-app-server`: two runs started together on one key both got a
+  thread. Notifications with `params: null`, a null item or a non-text delta threw.
+- `./server/providers/cli-oneshot`: a multi-byte character split between two chunks of a
+  child's output was corrupted. A child that ignored SIGTERM kept running, and with
+  runaway output its text kept accumulating until the process ran out of string.
+- `./server/providers/http-chat`: `sseEvents` treated a CR at the end of one chunk and
+  the LF at the start of the next as two line endings, and copied its whole buffer for
+  every chunk (4 MB in 1 KB chunks took nine seconds).
+- `./server/conversations`: a `turns` list holding something that is not a turn left its
+  key failing for the life of the process. A leftover temporary file with loose
+  permissions gave the conversation file those permissions for one write. Two stores on
+  one folder shared a temporary file name.
+- `./server/proposals`: the check that an edit's text occurs once could take 25 seconds
+  for a long `find` in a large document of repeating text. The search is now linear.
+- `./server/worklog`: `shapeOf` (used by `suggestRoutines` on code agents wrote) had a
+  pattern that backtracked exponentially on `/[a][a][a]…` with no closing slash. A log
+  line cut short by a crash swallowed the entry written after it.
+- `./server/profiles`: `createBindings` returned members of `Object.prototype` for
+  documents named `constructor` or `__proto__`.
+- `./server/history`: parts named like `Object` members were never reported as added.
+- `./server/commands`: a request line the URL parser rejects made `handle()` reject.
+
+Added (all optional):
+
+- `./server/conversations`: `requestId` on `send`; options `fsync`, `stopGrace`,
+  `evictAfter`; `unload(key)` and `loaded()`; error codes `unreadable`, `corrupt`, `closed`.
+- `./server/rpc`: `RpcError`, `createLineReader`; options `maxLine`, `killGrace`,
+  `processGroup`; events `stderr`, `oversize`, `unparsed`, `fault`.
+- `./server/providers/codex-app-server`: options `stopGrace`, `killGrace`, `maxLine`,
+  `processGroup`; `idleTimeout` on a run.
+- `./server/providers/cli-oneshot`: `validate` on a run; `processGroup`; `killGrace` on
+  `runProcess`.
+- `./server/providers/http-chat`: `retries` and `retryDelay` (off by default; only
+  before any answer has arrived; honours `Retry-After`), `idleTimeout`, `maxResponse`,
+  `maxKeys`; `sseEvents(body, { maxEvent })`.
+- `./server/commands`: `bodyTimeout`; `rotate()` on the endpoint.
+- `./server/history`, `./server/threads`: `fsync`, `onError`.
+- `./server/activity`: `drop(doc)`, `size()`.
+- `./server/routine-set`: `onError`. `./server/worklog`: `maxBytes` on a trail.
+- `./server/proposals`: `occurrences(body, needle, limit)`.
+
+Faster, measured (`bench/RESULTS.md`): the activity feed with many events kept, a burst
+of sends to one conversation, one large server-sent event in small chunks, listing and
+reading history, and the proposal check on awkward text. Not faster: one write of a
+large conversation, and saving a history version.
+
 ## 0.5.0
 
 Renamed from `@lyra-forge/agent-chat` to `@lyra-forge/leyline`. No API or export path changed. Telemetry attribute names follow the package name: `agent_chat.*` is now `leyline.*`.
