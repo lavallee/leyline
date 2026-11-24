@@ -55,5 +55,13 @@
     "cn": "0.4.0",
     "lucide-react": "1.57.0",
     "radix-ui": "1.8.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lavallee/leyline.git"
+  },
+  "homepage": "https://github.com/lavallee/leyline#readme",
+  "bugs": {
+    "url": "https://github.com/lavallee/leyline/issues"
   }
 }

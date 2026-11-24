@@ -515,8 +515,8 @@ import { createProfiles, createBindings, requestFor, providerFor, conversationKe
 const profiles = createProfiles({ dir: '/var/lib/myhost/profiles' });
 const bindings = createBindings({ file: '/var/lib/myhost/bindings.json' });
 
-profiles.add({ id: 'kiefer', workdir: '/home/me/agents/kiefer' });   // starts from the folder's AGENTS.md or README.md
-bindings.bind('page-42', 'local/kiefer');
+profiles.add({ id: 'editor', workdir: '/home/me/agents/editor' });   // starts from the folder's AGENTS.md or README.md
+bindings.bind('page-42', 'local/editor');
 
 const profile = bindings.bound(doc) ? await profiles.get(bindings.bound(doc)) : null;
 const provider = providerFor(profile, { codex, http }, codex);
