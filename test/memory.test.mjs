@@ -42,6 +42,11 @@ test('Codex: a thread id from an earlier process is resumed, and provenance says
   const fresh = await after.run({ key: 'doc:main', input: 'start over', threadId: one.provenance.threadId });
   assert.deepEqual([fresh.message, fresh.provenance.memory], ['turn 1: start over', 'new']);
   assert.equal((await sent('thread/resume')).length, 2);
+  // An agent that does not repeat its last usage report after a resume: the first report of the turn, less its own part, is the starting point.
+  const silent = new CodexAppServerProvider({ command: [process.execPath, fixture('fake-app-server.mjs')], workDir: path.join(dir, 'work'), env: { ...process.env, FAKE_THREADS: path.join(dir, 'threads.json'), FAKE_NO_USAGE_REPLAY: '1' } });
+  t.after(() => silent.close());
+  const quiet = await silent.run({ key: 'q', input: 'once more', threadId: lost.provenance.threadId });
+  assert.deepEqual([quiet.message, quiet.provenance.memory, quiet.usage.totalTokens, quiet.usage.inputTokens], ['turn 2: once more', 'resumed', 150, 100]);
   // A thread another key already holds is not taken by a second key.
   const taken = await after.run({ key: 'third:main', input: 'mine?', threadId: fresh.provenance.threadId });
   assert.deepEqual([taken.message, taken.provenance.memory], ['turn 1: mine?', 'new']);

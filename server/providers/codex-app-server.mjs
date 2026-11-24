@@ -376,8 +376,13 @@ export class CodexAppServerProvider {
     const run = this.pending.get(threadId);
     if (method === 'thread/tokenUsage/updated' && p.tokenUsage?.total && typeof p.tokenUsage.total === 'object') {
       const total = p.tokenUsage.total, last = p.tokenUsage.last;
-      // The first report on a thread taken up again: what it had used before this run is the total less this report's own part.
-      if (run && run.usageStart === null && last && typeof last === 'object') run.usageStart = Object.fromEntries(Object.keys(ZERO).map(name => [name, Math.max(0, (Number(total[name]) || 0) - (Number(last[name]) || 0))]));
+      // A thread taken up again: what it had used before this run is not known until the agent says. Observed with
+      // Codex 0.171.0: after thread/resume it first repeats the last report of the turn before (under that turn's
+      // id), which is the starting point itself; failing that, the first report of this turn less its own part is.
+      if (run && run.usageStart === null) {
+        if (!run.turnId || (p.turnId && p.turnId !== run.turnId)) run.usageStart = total;
+        else if (last && typeof last === 'object') run.usageStart = Object.fromEntries(Object.keys(ZERO).map(name => [name, Math.max(0, (Number(total[name]) || 0) - (Number(last[name]) || 0))]));
+      }
       this.totals.set(threadId, total);
     }
     if (!run) return;

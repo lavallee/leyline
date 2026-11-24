@@ -58,7 +58,11 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     const state = threads.get(params.threadId) || (process.env.FAKE_THREADS ? kept()[params.threadId] : null);
     if (!state) return send({ id, error: { code: -32600, message: `no rollout found for thread id ${params.threadId}` } });
     threads.set(params.threadId, state);
-    return send({ id, result: { thread: { id: params.threadId, turns: [] } } });
+    send({ id, result: { thread: { id: params.threadId, turns: [] } } });
+    // As Codex does after a resume: the last usage report of the turn before, again.
+    if (process.env.FAKE_NO_USAGE_REPLAY) return;
+    return note('thread/tokenUsage/updated', { threadId: params.threadId, turnId: 'an-earlier-turn', tokenUsage: { total: { totalTokens: state.total * 1.5, inputTokens: state.total, cachedInputTokens: 0, outputTokens: state.total / 2, reasoningOutputTokens: 10 * state.turns },
+      last: { totalTokens: 150, inputTokens: 100, cachedInputTokens: 0, outputTokens: 50, reasoningOutputTokens: 10 } } });
   }
   if (method === 'turn/interrupt') {
     send({ id, result: {} });
