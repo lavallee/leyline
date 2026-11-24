@@ -236,6 +236,14 @@ test('an approval may be answered asynchronously; a callback that throws or reje
   assert.deepEqual((await answer(broken.log)).result, { decision: 'decline' });
 });
 
+test('idleTimeout: a run that goes quiet is stopped long before its overall timeout', async t => {
+  const { provider } = await setup(t, { stopGrace: 100 });
+  const began = Date.now();
+  await assert.rejects(provider.run({ key: 'a', input: 'deaf', timeout: 60000, idleTimeout: 150 }), { code: 'timeout' });
+  assert.ok(Date.now() - began < 3000);
+  assert.equal((await provider.run({ key: 'a', input: 'busy all the way', idleTimeout: 2000 })).message, 'turn 1: busy all the way', 'a run that keeps reporting is left alone');
+});
+
 test('commandLine strips the shell wrapper', () => {
   assert.equal(commandLine(['/bin/bash', '-lc', 'ls -la']), 'ls -la');
   assert.equal(commandLine("/usr/bin/zsh -c 'echo hi'"), 'echo hi');

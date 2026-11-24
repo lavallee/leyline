@@ -6,13 +6,15 @@
 // process.exit, every child still running is sent SIGTERM. A host that is itself killed by
 // a signal runs no code, so its children then see only their stdin close.
 const live = new Set();
+const grouped = new WeakSet();   // children that lead a process group of their own
 let hooked = false;
 
 /** Remembers a child so it is asked to stop if the host process exits first. */
-export function track(child) {
+export function track(child, { group = false } = {}) {
+  if (group) grouped.add(child);
   if (!hooked) {
     hooked = true;
-    process.on('exit', () => { for (const c of live) try { c.kill('SIGTERM'); } catch { /* already gone */ } });
+    process.on('exit', () => { for (const c of live) try { if (grouped.has(c)) process.kill(-c.pid, 'SIGTERM'); else c.kill('SIGTERM'); } catch { /* already gone */ } });
   }
   live.add(child);
   const gone = () => live.delete(child);
@@ -23,13 +25,21 @@ export function track(child) {
 
 const exited = child => child.exitCode !== null || child.signalCode !== null;
 
-/** Asks a child to stop, and kills it if it is still there after `grace` milliseconds. */
-export function terminate(child, grace = 2000) {
-  if (!child || !child.pid || exited(child)) return;
-  try { child.kill('SIGTERM'); } catch { return; }
-  const timer = setTimeout(() => { if (!exited(child)) try { child.kill('SIGKILL'); } catch { /* gone */ } }, grace);
+/**
+ * Asks a child to stop, and kills it if it is still there after `grace` milliseconds.
+ * With `group` (for a child spawned `detached`, so that it leads a process group of its
+ * own) both signals go to the whole group: the child and everything it started. The
+ * SIGKILL is then sent to the group even when the child itself has gone, since what it
+ * started may not have.
+ */
+export function terminate(child, grace = 2000, { group = false } = {}) {
+  if (!child || !child.pid) return;
+  const signal = name => { try { if (group) process.kill(-child.pid, name); else child.kill(name); return true; } catch { return false; } };
+  if (!group && exited(child)) return;
+  if (!signal('SIGTERM')) return;
+  const timer = setTimeout(() => { if (group || !exited(child)) signal('SIGKILL'); }, grace);
   timer.unref?.();
-  child.once('exit', () => clearTimeout(timer));
+  if (!group) child.once('exit', () => clearTimeout(timer));
 }
 
 /** How many tracked children are still running. For tests and diagnostics. */

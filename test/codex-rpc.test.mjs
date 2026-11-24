@@ -129,3 +129,23 @@ test('children are stopped when the host process exits', async t => {
   t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch { /* gone, as it should be */ } });
   await until(() => !alive(pid), 3000);
 });
+
+test('lines that are not JSON are offered to a listener instead of vanishing', async t => {
+  const { rpc, seen } = await replay(t, 'WARN something on stdout\n{"method":"ok","params":{}}\n{ half\n', [4096]);
+  const unparsed = [];
+  rpc.on('unparsed', line => unparsed.push(line));
+  await until(() => seen.notification.length === 1 && unparsed.length === 2);
+  assert.deepEqual(unparsed, ['WARN something on stdout', '{ half']);
+});
+
+test('processGroup: close() also ends what the child started', async t => {
+  const dir = await tempDir(t), file = path.join(dir, 'pids');
+  const rpc = new CodexRpc({ command: child('family', file), processGroup: true, killGrace: 200 });
+  rpc.start();
+  await once(rpc, 'notification');
+  const pids = JSON.parse(await readFile(file, 'utf8'));
+  t.after(() => { for (const pid of Object.values(pids)) try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } });
+  assert.ok(alive(pids.child) && alive(pids.grandchild));
+  rpc.close();
+  await until(() => !alive(pids.child) && !alive(pids.grandchild), 3000);
+});

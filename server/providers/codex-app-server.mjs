@@ -47,13 +47,14 @@ export class CodexAppServerProvider {
    *   ended anyway and its thread forgotten; default 10000. Infinity waits for the run's own timeout.
    * @param {number} [options.killGrace] milliseconds close() waits after SIGTERM before SIGKILL; default 2000
    * @param {number} [options.maxLine] characters in one line from the child; longer lines are dropped. Default 64 MB
+   * @param {boolean} [options.processGroup] stop what the child started along with it; see CodexRpc. Default false
    */
   constructor({ command = ['codex', 'app-server'], workDir, clientInfo = { name: SHORT_NAME }, serviceName, env = process.env,
-    dropEnv = ['OPENAI_API_KEY'], disableUserExtensions = true, threadConfig = {}, model, onApproval, onStderr, stopGrace = 10000, killGrace = 2000, maxLine } = {}) {
+    dropEnv = ['OPENAI_API_KEY'], disableUserExtensions = true, threadConfig = {}, model, onApproval, onStderr, stopGrace = 10000, killGrace = 2000, maxLine, processGroup = false } = {}) {
     if (!Array.isArray(command) || !command.length || command.some(part => typeof part !== 'string' || !part || part.includes('\0')))
       throw new ProviderError('The app-server command must be a list of non-empty strings.', 'config');
     if (typeof workDir !== 'string' || !workDir) throw new ProviderError('Give the app-server a working folder (workDir).', 'config');
-    Object.assign(this, { command, workDir, serviceName: serviceName || clientInfo.name, disableUserExtensions, threadConfig, fixedModel: model, onStderr, stopGrace, killGrace, maxLine });
+    Object.assign(this, { command, workDir, serviceName: serviceName || clientInfo.name, disableUserExtensions, threadConfig, fixedModel: model, onStderr, stopGrace, killGrace, maxLine, processGroup });
     this.clientInfo = { name: clientInfo.name, title: clientInfo.title || clientInfo.name, version: clientInfo.version || '0.0.0' };
     this.env = Object.fromEntries(Object.entries(env).filter(([name]) => !dropEnv.includes(name)));
     this.onApproval = onApproval || (() => ({ decision: 'decline' }));
@@ -69,7 +70,7 @@ export class CodexAppServerProvider {
     if (this.ready) return this.ready;
     this.ready = (async () => {
       await mkdir(this.workDir, { recursive: true, mode: 0o700 });
-      const rpc = this.rpc = new CodexRpc({ command: this.command, cwd: this.workDir, env: this.env, killGrace: this.killGrace, ...(this.maxLine ? { maxLine: this.maxLine } : {}) });
+      const rpc = this.rpc = new CodexRpc({ command: this.command, cwd: this.workDir, env: this.env, killGrace: this.killGrace, processGroup: this.processGroup, ...(this.maxLine ? { maxLine: this.maxLine } : {}) });
       // What the child sends is data: a message in an unexpected form is skipped, never thrown.
       rpc.on('notification', message => { try { this.event(message); } catch { /* skipped */ } });
       rpc.on('request', message => {
@@ -118,8 +119,10 @@ export class CodexAppServerProvider {
    * @param {object} [request.outputSchema] a JSON Schema for the final message
    * @param {object} [request.threadConfig] extra Codex config for this key's thread
    * @param {string} [request.model] a model for this run, instead of the provider's
+   * @param {number} [request.idleTimeout] milliseconds without any word from the agent about this run after which
+   *   it is stopped with code 'timeout', as when `timeout` passes. Default: none
    */
-  async run({ key, instructions, input, effort = 'low', sandbox = {}, outputSchema, threadConfig, model: asked, onEvent = () => {}, signal, timeout = 900000 } = {}) {
+  async run({ key, instructions, input, effort = 'low', sandbox = {}, outputSchema, threadConfig, model: asked, onEvent = () => {}, signal, timeout = 900000, idleTimeout } = {}) {
     if (typeof key !== 'string' || !key) throw new ProviderError('Give the run a conversation key.', 'config');
     const parts = inputParts(input);
     if (!parts.length) throw new ProviderError('Give the run some input.', 'config');
@@ -160,22 +163,26 @@ export class CodexAppServerProvider {
       }
       if (signal?.aborted) throw new ProviderError('Stopped.', 'stopped');
       if (this.rpc !== rpc) throw new ProviderError('The agent connection was closed.', 'unavailable');
-      return this.turn({ rpc, key, threadId, cwd, parts, effort, policy, outputSchema, model, asked, onEvent, signal, timeout });
+      return this.turn({ rpc, key, threadId, cwd, parts, effort, policy, outputSchema, model, asked, onEvent, signal, timeout, idleTimeout });
     } finally { this.starting.delete(key); signal?.removeEventListener('abort', halt); }
   }
 
   // Starts the turn and returns the promise that settles when it ends. The run is in
   // `pending` before this returns, so the key stays taken without a gap.
-  turn({ rpc, key, threadId, cwd, parts, effort, policy, outputSchema, model, asked, onEvent, signal, timeout }) {
+  turn({ rpc, key, threadId, cwd, parts, effort, policy, outputSchema, model, asked, onEvent, signal, timeout, idleTimeout }) {
     return new Promise((resolve, reject) => {
       const abort = () => this.cancel(key);
       const run = { key, threadId, model: asked, text: '', turnId: null, cancelled: false, onEvent, parts: new Set(), usageStart: this.totals.get(threadId) || ZERO,
         finish: (error, result) => {
           if (this.pending.get(threadId) !== run) return;
-          clearTimeout(run.timer); clearTimeout(run.grace); signal?.removeEventListener('abort', abort); this.pending.delete(threadId);
+          clearTimeout(run.timer); clearTimeout(run.grace); clearTimeout(run.idle); signal?.removeEventListener('abort', abort); this.pending.delete(threadId);
           error ? reject(error) : resolve(result);
         } };
       run.timer = setTimeout(() => { this.cancel(key); this.threads.delete(key); run.finish(new ProviderError('The request ran out of time and was stopped.', 'timeout')); }, Math.min(Math.max(0, Number(timeout) || 0), 2 ** 31 - 1));
+      const expire = () => { this.cancel(key); this.threads.delete(key); run.finish(new ProviderError('The agent went quiet and was stopped.', 'timeout')); };
+      // Called for every notification about this run: the quiet period starts again.
+      run.heard = () => { if (!(idleTimeout > 0)) return; clearTimeout(run.idle); run.idle = setTimeout(expire, Math.min(idleTimeout, 2 ** 31 - 1)); };
+      run.heard();
       this.pending.set(threadId, run);
       signal?.addEventListener('abort', abort, { once: true });
       rpc.call('turn/start', { threadId, cwd, input: parts.map(said), effort, summary: 'auto', sandboxPolicy: policy,
@@ -218,6 +225,7 @@ export class CodexAppServerProvider {
     const threadId = p.threadId || p.turn?.threadId;
     if (method === 'thread/tokenUsage/updated' && p.tokenUsage?.total && typeof p.tokenUsage.total === 'object') this.totals.set(threadId, p.tokenUsage.total);
     const run = this.pending.get(threadId); if (!run) return;
+    run.heard?.();
     const emit = event => { try { run.onEvent(event); } catch { /* a host's handler must not break the run */ } };
     const item = p.item && typeof p.item === 'object' ? p.item : {};
     if (method === 'turn/started') {

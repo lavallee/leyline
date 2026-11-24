@@ -52,7 +52,9 @@ export function createLineReader(onLine, { maxLine = 64 << 20, onOversize = () =
 //
 // Events: 'notification' and 'request' (messages from the child), 'stderr' (chunks of the
 // child's stderr, which is always drained so the child cannot block on it), 'oversize'
-// (a line over `maxLine` was dropped) and 'fault' (a listener threw; the reader carries on).
+// (a line over `maxLine` was dropped), 'unparsed' (a line that was not a JSON object, with
+// its text: a child printing a warning on stdout, say) and 'fault' (a listener threw; the
+// reader carries on).
 export class CodexRpc extends EventEmitter {
   /**
    * @param {object} options
@@ -61,14 +63,17 @@ export class CodexRpc extends EventEmitter {
    * @param {object} [options.env] default process.env
    * @param {number} [options.maxLine] characters in one line from the child; longer lines are dropped. Default 64 MB
    * @param {number} [options.killGrace] milliseconds close() waits after SIGTERM before SIGKILL; default 2000
+   * @param {boolean} [options.processGroup] start the child in a process group of its own and signal the whole
+   *   group on close(), so that what the child started stops with it. Default false, because such a child no
+   *   longer receives a Ctrl-C typed at the host's terminal: only close() and a normal exit of the host stop it.
    */
-  constructor({ command = ['codex', 'app-server'], cwd, env = process.env, maxLine = 64 << 20, killGrace = 2000 }) {
-    super(); this.command = command; this.cwd = cwd; this.env = env; this.maxLine = maxLine; this.killGrace = killGrace; this.seq = 0; this.calls = new Map();
+  constructor({ command = ['codex', 'app-server'], cwd, env = process.env, maxLine = 64 << 20, killGrace = 2000, processGroup = false }) {
+    super(); this.command = command; this.cwd = cwd; this.env = env; this.maxLine = maxLine; this.killGrace = killGrace; this.processGroup = !!processGroup; this.seq = 0; this.calls = new Map();
   }
   start() {
     if (this.proc) return this.proc;
     const [file, ...args] = this.command;
-    const proc = this.proc = track(spawn(file, args, { cwd: this.cwd, env: this.env, stdio: ['pipe', 'pipe', 'pipe'], shell: false }));
+    const proc = this.proc = track(spawn(file, args, { cwd: this.cwd, env: this.env, stdio: ['pipe', 'pipe', 'pipe'], shell: false, detached: this.processGroup }), { group: this.processGroup });
     const reader = createLineReader(line => this.dispatch(line), { maxLine: this.maxLine, onOversize: length => this.tell('oversize', length) });
     proc.stdout.on('data', reader.push);
     proc.stdout.on('end', reader.end);
@@ -95,8 +100,8 @@ export class CodexRpc extends EventEmitter {
   }
   /** Takes one line from the child. Anything that is not a JSON object is ignored. */
   dispatch(line) {
-    let msg; try { msg = JSON.parse(line); } catch { return; }
-    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return;
+    let msg; try { msg = JSON.parse(line); } catch { return this.tell('unparsed', line); }
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return this.tell('unparsed', line);
     if (msg.id !== undefined && !msg.method) {
       const call = this.calls.get(msg.id); if (!call) return;
       clearTimeout(call.timer); this.calls.delete(msg.id);
@@ -128,6 +133,6 @@ export class CodexRpc extends EventEmitter {
     const proc = this.proc; if (!proc) return;
     this.proc = null;
     this.fail(proc, new RpcError('The agent connection stopped.', 'closed'));
-    terminate(proc, this.killGrace);
+    terminate(proc, this.killGrace, { group: this.processGroup });
   }
 }

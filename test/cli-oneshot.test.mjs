@@ -188,3 +188,28 @@ test('codex preset: a stop during the login check is honoured at once', async t 
   await assert.rejects(run, { code: 'stopped' });
   assert.ok(Date.now() - began < 2000, `took ${Date.now() - began} ms`);
 });
+
+test('processGroup: stopping a run also ends what the child started', async t => {
+  const dir = await tempDir(t), file = path.join(dir, 'pids');
+  const controller = new AbortController();
+  const run = runProcess(process.execPath, [fixture('scripted-child.mjs'), 'family', file], { signal: controller.signal, processGroup: true, killGrace: 200 });
+  run.catch(() => {});
+  const { existsSync, readFileSync } = await import('node:fs');
+  await waitFor(() => existsSync(file) && readFileSync(file, 'utf8').endsWith('}'));
+  const pids = JSON.parse(readFileSync(file, 'utf8'));
+  t.after(() => { for (const pid of Object.values(pids)) try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } });
+  controller.abort();
+  await assert.rejects(run, { code: 'stopped' });
+  await waitFor(() => !alive(pids.child) && !alive(pids.grandchild), 3000);
+});
+
+test('validate: a host checks a structured answer before it is returned', async () => {
+  const provider = new CliOneshotProvider({ preset: 'command', command: echo });
+  const ok = await provider.run({ input: 'x', json: true, validate: data => typeof data.summary === 'string' });
+  assert.match(ok.data.summary, /^read /);
+  const repaired = await provider.run({ input: 'x', json: true, validate: data => ({ summary: data.summary.toUpperCase() }) });
+  assert.match(repaired.data.summary, /^READ /);
+  await assert.rejects(provider.run({ input: 'x', json: true, validate: () => false }), { code: 'failed', message: /did not pass/ });
+  await assert.rejects(provider.run({ input: 'x', json: true, validate: () => 'summary must be short' }), { code: 'failed', message: /summary must be short/ });
+  await assert.rejects(provider.run({ input: 'x', json: true, validate: () => { throw new Error('schema says no'); } }), { code: 'failed', message: /schema says no/ });
+});
