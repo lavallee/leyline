@@ -15,7 +15,7 @@
 // never changes, so an agent keyed by it keeps its memory from turn to turn. A request
 // that starts while the main lane is busy gets a side lane with an id of its own, used
 // once: a fresh agent. `maxLanes: 1` gives a strict one-at-a-time queue.
-import { mkdir, open as openFile, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
+import { mkdir, open as openFile, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { foldActivity, settleActivity } from './providers/contract.mjs';
@@ -126,8 +126,10 @@ export function createConversationStore({ dir, run, maxLanes = 4, maxTurns = 200
     await ready();
     const temporary = `${file}.${process.pid}-${(++serial).toString(36)}.tmp`;
     try {
-      const handle = await openFile(temporary, 'wx', 0o600);
-      try { await handle.writeFile(bytes); if (fsync) await handle.sync(); } finally { await handle.close(); }
+      if (fsync) {
+        const handle = await openFile(temporary, 'wx', 0o600);
+        try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
+      } else await writeFile(temporary, bytes, { mode: 0o600, flag: 'wx' });   // one call into the file system, which is markedly quicker than a handle
       await rename(temporary, file);
     } catch (error) {
       await rm(temporary, { force: true }).catch(() => {});
