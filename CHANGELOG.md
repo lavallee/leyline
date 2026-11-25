@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.2 (2026-11-24)
+
+- **Rows under More wrap.** A long label (a line of status a host shows there on a phone) takes
+  two lines instead of running out of the menu, which is a little wider (256px).
+
 ## 0.9.1 (2026-11-24)
 
 The strip and the chat panel on a phone, so a host needs no bar of its own there.
