@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.3 (2026-11-24)
+
+- **RoutineMenu `closeOnRun`.** The menu closes as a run starts, for a host whose own panel
+  shows the work on a screen the menu would cover (Copycat on a phone).
+
 ## 0.9.2 (2026-11-24)
 
 - **Rows under More wrap.** A long label (a line of status a host shows there on a phone) takes
