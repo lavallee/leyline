@@ -105,7 +105,7 @@ test('server modules import only Node built-ins and each other', async () => {
   }
 });
 
-test('the package is 0.9.2, MIT, for Node 22 or later', async () => {
-  assert.equal(pkg.version, '0.9.2'); assert.equal(pkg.license, 'MIT'); assert.equal(pkg.engines.node, '>=22'); assert.equal(pkg.type, 'module');
+test('the package is 0.9.3, MIT, for Node 22 or later', async () => {
+  assert.equal(pkg.version, '0.9.3'); assert.equal(pkg.license, 'MIT'); assert.equal(pkg.engines.node, '>=22'); assert.equal(pkg.type, 'module');
   assert.match(await readFile(path.join(root, 'LICENSE'), 'utf8'), /MIT License/);
 });

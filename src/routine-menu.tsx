@@ -23,7 +23,7 @@ const describe = (result: any) => (typeof result === 'string' ? result : result?
  * run with one click, grouped by kind when the host has kinds, searchable once there are
  * more than six, with habits the agent noticed offered for banking.
  */
-export function RoutineMenu({ engine, onAskAgent, loadRoutines, runRoutine, saveRoutine, removeRoutine, loadSuggestions, suggestionRequest, container: given, scopeLabel = 'canvas', productName = 'toucan', askLabel = 'Ask the agent to bank one', namePlaceholder = 'Name, like Colour the blocked boxes red', bodyLabel = 'Routine code', bodyPlaceholder = '// editor, tl, toucan and args are in scope', description = 'Chores banked once, for every canvas. A run is one undo step.', label = 'Routines', running: busy }: {
+export function RoutineMenu({ engine, onAskAgent, loadRoutines, runRoutine, saveRoutine, removeRoutine, loadSuggestions, suggestionRequest, container: given, scopeLabel = 'canvas', productName = 'toucan', askLabel = 'Ask the agent to bank one', namePlaceholder = 'Name, like Colour the blocked boxes red', bodyLabel = 'Routine code', bodyPlaceholder = '// editor, tl, toucan and args are in scope', description = 'Chores banked once, for every canvas. A run is one undo step.', label = 'Routines', running: busy , closeOnRun}: {
 	engine: string
 	/** Opens the chat with a request drafted: none for "help me bank one", or the text to send. */
 	onAskAgent: (text?: string) => void
@@ -47,6 +47,8 @@ export function RoutineMenu({ engine, onAskAgent, loadRoutines, runRoutine, save
 	label?: string
 	/** A routine the host is running on its own (from a slash command, say): shown on the trigger. */
 	running?: string
+	/** Close the menu as a run starts. For a host whose own panel shows the work, on a screen the menu would cover. */
+	closeOnRun?: boolean
 }) {
 	const fromBar = useAppBarContainer()
 	const container = given ?? fromBar
@@ -73,6 +75,7 @@ export function RoutineMenu({ engine, onAskAgent, loadRoutines, runRoutine, save
 	async function run(r: Routine) {
 		setRunning(r.name)
 		setOutcome(null)
+		if (closeOnRun) setOpen(false)
 		try {
 			const res = await runRoutine(r.name)
 			setOutcome({ name: r.name, ok: res.ok, text: res.ok ? describe(res.result) : res.error })
