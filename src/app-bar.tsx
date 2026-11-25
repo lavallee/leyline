@@ -92,7 +92,7 @@ export function AppBarButton({ icon: Icon, label, pressed, count, attention, col
 	) : null
 	if (inMore)
 		return (
-			<Button variant="ghost" size="sm" className={cn('w-full justify-start pointer-coarse:h-11 pointer-coarse:text-sm', pressed && 'bg-muted', className)} aria-pressed={rest["aria-expanded"] === undefined ? pressed : undefined} title={title ?? label} {...rest}>
+			<Button variant="ghost" size="sm" className={cn('h-auto min-h-7 w-full justify-start py-1 whitespace-normal pointer-coarse:min-h-11 pointer-coarse:text-sm', pressed && 'bg-muted', className)} aria-pressed={rest["aria-expanded"] === undefined ? pressed : undefined} title={title ?? label} {...rest}>
 				{Icon && <Icon />}
 				<span className="flex-1 text-left">{label}</span>
 				{badge}
@@ -124,7 +124,7 @@ export function AppBarMore({ label = 'More', children }: { label?: string; child
 					<EllipsisIcon />
 				</Button>
 			</PopoverTrigger>
-			<PopoverContent container={container} className="w-56 max-w-[calc(100vw-1rem)] p-1" onClick={(e) => (e.target as HTMLElement).closest('button') && setOpen(false)}>
+			<PopoverContent container={container} className="w-64 max-w-[calc(100vw-1rem)] p-1" onClick={(e) => (e.target as HTMLElement).closest('button') && setOpen(false)}>
 				<InMore.Provider value={true}>
 					<div className="flex flex-col">{children}</div>
 				</InMore.Provider>
