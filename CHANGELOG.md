@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.1 (2026-11-24)
+
+The strip and the chat panel on a phone, so a host needs no bar of its own there.
+
+- **AppBar on touch screens.** Every action is at least 36px square on a coarse pointer, rows
+  under More are 44px, and the primary action (`variant="default"`) keeps its label at any
+  width. More never opens wider than the screen.
+- **The conversation never spills over the composer.** In a short panel its region is clipped,
+  and the empty state scrolls. Before, a phone's sheet drew the empty state and the
+  jump-to-latest button on top of the rows below.
+- **A phone's chat sheet is 62% of the stage**, up from 45%, which left room for one row.
+
 ## 0.9.0 (2026-11-24)
 
 Dispatch: a document can hand work to something that does it elsewhere, and hear back

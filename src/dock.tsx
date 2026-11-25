@@ -162,7 +162,7 @@ export function ChatDock({ chat, stage, children }: { chat: Chat; stage: RefObje
 	}
 
 	const size = narrow
-		? { height: '45%' }
+		? { height: '62%' } // a phone's sheet: room for a few turns above the composer, the page still in view
 		: dock === 'bottom'
 			? { height: layout.height, maxHeight: 'calc(100% - 200px)' }
 			: dock === 'float'
