@@ -72,6 +72,8 @@ export const useAppBarContainer = () => useContext(ContainerContext)
  * `attention` with no count is an amber dot. `variant="outline"` is for the chat toggle,
  * which comes last; `variant="default"` for the one action the page is for (Review).
  * `collapse` moves it into AppBarMore on a phone.
+ * On a touch screen every action is at least 36px square, and the primary action keeps its
+ * label at any width, so a phone shows the same strip as a desk with nothing to learn again.
  */
 export function AppBarButton({ icon: Icon, label, pressed, count, attention, collapse, variant = 'ghost', className, title, children, ...rest }: Omit<ComponentProps<typeof Button>, 'size'> & {
 	icon?: Icon
@@ -90,7 +92,7 @@ export function AppBarButton({ icon: Icon, label, pressed, count, attention, col
 	) : null
 	if (inMore)
 		return (
-			<Button variant="ghost" size="sm" className={cn('w-full justify-start', pressed && 'bg-muted', className)} aria-pressed={rest["aria-expanded"] === undefined ? pressed : undefined} title={title ?? label} {...rest}>
+			<Button variant="ghost" size="sm" className={cn('w-full justify-start pointer-coarse:h-11 pointer-coarse:text-sm', pressed && 'bg-muted', className)} aria-pressed={rest["aria-expanded"] === undefined ? pressed : undefined} title={title ?? label} {...rest}>
 				{Icon && <Icon />}
 				<span className="flex-1 text-left">{label}</span>
 				{badge}
@@ -98,9 +100,9 @@ export function AppBarButton({ icon: Icon, label, pressed, count, attention, col
 			</Button>
 		)
 	return (
-		<Button data-attention={attention || undefined} variant={variant} size="sm" aria-pressed={rest["aria-expanded"] === undefined ? pressed : undefined} aria-label={count ? `${label}, ${count}` : label} title={title ?? label} className={cn('relative', variant === 'outline' && 'ml-1', pressed && variant === 'ghost' && 'bg-muted', collapse && 'max-sm:hidden', className)} {...rest}>
+		<Button data-attention={attention || undefined} variant={variant} size="sm" aria-pressed={rest["aria-expanded"] === undefined ? pressed : undefined} aria-label={count ? `${label}, ${count}` : label} title={title ?? label} className={cn('relative pointer-coarse:h-9 pointer-coarse:min-w-9', variant === 'outline' && 'ml-1', pressed && variant === 'ghost' && 'bg-muted', collapse && 'max-sm:hidden', className)} {...rest}>
 			{Icon && <Icon />}
-			<span className={cn(Icon && 'max-lg:hidden')}>{label}</span>
+			<span className={cn(Icon && variant !== 'default' && 'max-lg:hidden')}>{label}</span>
 			{badge}
 			{children}
 		</Button>
@@ -118,11 +120,11 @@ export function AppBarMore({ label = 'More', children }: { label?: string; child
 	return (
 		<Popover open={open} onOpenChange={setOpen}>
 			<PopoverTrigger asChild>
-				<Button variant="ghost" size="icon-sm" aria-label={label} title={label} className="sm:hidden">
+				<Button variant="ghost" size="icon-sm" aria-label={label} title={label} className="pointer-coarse:size-9 sm:hidden">
 					<EllipsisIcon />
 				</Button>
 			</PopoverTrigger>
-			<PopoverContent container={container} className="w-56 p-1" onClick={(e) => (e.target as HTMLElement).closest('button') && setOpen(false)}>
+			<PopoverContent container={container} className="w-56 max-w-[calc(100vw-1rem)] p-1" onClick={(e) => (e.target as HTMLElement).closest('button') && setOpen(false)}>
 				<InMore.Provider value={true}>
 					<div className="flex flex-col">{children}</div>
 				</InMore.Provider>

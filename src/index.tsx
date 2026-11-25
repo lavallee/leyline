@@ -93,8 +93,9 @@ export function ChatComposer({ draft, onDraftChange, onSend, onStop, online, bus
 }
 export type ConversationMessage = { id: string; role: 'user' | 'assistant'; text?: string; content?: React.ReactNode }
 export function Conversation({ messages, busy, emptyTitle, emptyDescription }: { messages: ConversationMessage[]; busy: boolean; emptyTitle: string; emptyDescription: React.ReactNode }) {
- return <MessageScrollerProvider autoScroll defaultScrollPosition="last-anchor"><div className="relative min-h-0 flex-1">
- {messages.length === 0 ? <Empty className="h-full"><EmptyHeader><EmptyMedia variant="icon"><MessageCircleDashedIcon /></EmptyMedia><EmptyTitle>{emptyTitle}</EmptyTitle><EmptyDescription>{emptyDescription}</EmptyDescription></EmptyHeader></Empty> :
+ return <MessageScrollerProvider autoScroll defaultScrollPosition="last-anchor"><div className={`relative min-h-0 flex-1 ${messages.length === 0 ? 'overflow-y-auto' : 'overflow-hidden'}`}>
+ {/* The region never spills over the composer below it: in a short panel (a phone's sheet) it scrolls. */}
+ {messages.length === 0 ? <Empty className="min-h-full"><EmptyHeader><EmptyMedia variant="icon"><MessageCircleDashedIcon /></EmptyMedia><EmptyTitle>{emptyTitle}</EmptyTitle><EmptyDescription>{emptyDescription}</EmptyDescription></EmptyHeader></Empty> :
  <MessageScroller><MessageScrollerViewport><MessageScrollerContent aria-busy={busy} className="gap-5 px-4 py-4">
  {messages.map(m => <MessageScrollerItem key={m.id} messageId={m.id} scrollAnchor={m.role === 'user'}>
  {m.role === 'user' ? <Message align="end"><MessageContent><Bubble align="end" variant="muted"><BubbleContent className="whitespace-pre-wrap">{m.text}</BubbleContent></Bubble></MessageContent></Message> : m.content || <Message><MessageContent className="whitespace-pre-wrap">{m.text}</MessageContent></Message>}
